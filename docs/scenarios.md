@@ -1,6 +1,6 @@
 # xmMessaging Scenario Suite — the use cases that define the API
 
-- Status: **P0.0 wish-code in progress** (no scenario is executable yet; the API does not exist)
+- Status: **P0.0 wish-code complete** (all 14 scenarios wish-coded, deltas D1–D18 recorded; nothing executable yet — the API headers are the next phase, P0a, derived from the deltas)
 - Date: 2026-07-10
 - Governing design: [design.md](design.md) and [ADR 0006](https://github.com/rxdu/xmotion/blob/main/docs/adr/0006-messaging-layer.md)
 
