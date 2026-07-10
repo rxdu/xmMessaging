@@ -90,10 +90,18 @@ target_compile_features(xmmessaging PUBLIC cxx_std_17)
 target_compile_options(xmmessaging PRIVATE ${XMMESSAGING_WARNINGS})
 add_library(xmotion::xmmessaging ALIAS xmmessaging)
 
-## Backend seam status (engines arrive at P1/P1b/P2; the options exist now so
-## application build scripts can already pin their intent).
+## Backend seam status (iceoryx2/Zenoh arrive at P1/P2; the options exist now
+## so application build scripts can already pin their intent).
 if (XMMESSAGING_WITH_POSIX_SHM)
-  message(STATUS "xmMessaging: POSIX shm fallback backend enabled (implementation lands at P1b)")
+  if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(STATUS "xmMessaging: POSIX shm fallback backend requires Linux (futex/shm_open) — disabled on ${CMAKE_SYSTEM_NAME}")
+  else ()
+    ## P1b: dependency-free — kernel primitives only (shm_open + futex).
+    ## PUBLIC: the typed verbs live in headers, so consumers must see the
+    ## same backend gate the library was built with.
+    target_compile_definitions(xmmessaging PUBLIC XMMESSAGING_HAS_POSIX_SHM=1)
+    message(STATUS "xmMessaging: POSIX shm fallback backend enabled (P1b)")
+  endif ()
 endif ()
 if (XMMESSAGING_WITH_ICEORYX2)
   message(STATUS "xmMessaging: iceoryx2 backend enabled (implementation lands at P1)")

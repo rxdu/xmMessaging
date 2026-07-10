@@ -40,13 +40,28 @@ std::map<std::string, std::weak_ptr<DomainState>>& Registry() {
 }  // namespace
 
 std::string DeriveIsolationKey(const std::string& configured_name) {
-  // D17 default: derived from user + configured name. The exact
-  // cross-process derivation (separators, truncation for length-limited
-  // backend namespaces) is wire-contract §6.2, TBD at P1 — in-process only
-  // needs stable per-user, per-name identity within one process.
-  const std::string base = configured_name.empty() ? "default" : configured_name;
+  // D17 default, now SPECIFIED (wire-contract §6.2, resolved at P1b):
+  //   key := "u" <euid decimal> "." <sanitized-domain-name>
+  // where the sanitizer folds uppercase to lowercase and maps every byte
+  // outside [a-z0-9_] to '_'. The numeric euid (not the login name) keeps
+  // the derivation deterministic and passwd-free, and a foreign participant
+  // reproduces it from getuid() alone. Backend resource names prefix this
+  // key (POSIX shm: "/xmmsg.<key>.<topic>", shm_segment.hpp).
+  const std::string base =
+      configured_name.empty() ? "default" : configured_name;
+  std::string sanitized;
+  sanitized.reserve(base.size());
+  for (char c : base) {
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+      sanitized += c;
+    } else if (c >= 'A' && c <= 'Z') {
+      sanitized += static_cast<char>(c - 'A' + 'a');
+    } else {
+      sanitized += '_';
+    }
+  }
   return "u" + std::to_string(static_cast<unsigned long>(::geteuid())) + "." +
-         base;
+         sanitized;
 }
 
 std::shared_ptr<DomainState> AcquireDomainState(const std::string& key) {
@@ -102,17 +117,29 @@ Domain Domain::InProcess(InProcessConfig config) {
   return domain;
 }
 
-// The three backend factories below yield Domains whose endpoints carry
-// kUnsupportedReach (M8-A2): their backends are not compiled into this
-// build tier yet (POSIX shm: P1b; iceoryx2: P1; Zenoh: P2). Never a silent
+// P1b: the POSIX shm fallback backend. When compiled in (the default —
+// it has no dependencies to creep, design.md "Backend seam") the Domain
+// carries only its isolation key: the cross-process "registry" is /dev/shm
+// itself, one named segment per topic (detail/shm_segment.hpp). When
+// compiled out, endpoints carry kUnsupportedReach (M8-A2) — never a silent
 // in-process fallback.
 Domain Domain::PosixShm(PosixShmConfig config) {
-  (void)config;
   Domain domain;
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  domain.impl_ = new detail::DomainImpl(
+      detail::DomainImpl::Reach::kPosixShm, nullptr,
+      detail::DeriveIsolationKey(config.name));
+#else
+  (void)config;
   domain.impl_ =
       new detail::DomainImpl(detail::DomainImpl::Reach::kPosixShm, nullptr);
+#endif
   return domain;
 }
+
+// The two backend factories below yield Domains whose endpoints carry
+// kUnsupportedReach (M8-A2): their backends are not compiled into this
+// build tier yet (iceoryx2: P1; Zenoh: P2).
 
 Domain Domain::Iceoryx2(Iceoryx2Config config) {
   (void)config;
@@ -146,11 +173,31 @@ Domain& Domain::operator=(Domain&& other) noexcept {
 Domain::~Domain() { delete impl_; }
 
 bool Domain::Supports(Contract contract) const noexcept {
-  (void)contract;
+  if (impl_ == nullptr || !impl_->available()) {
+    // Unavailable-backend domains support nothing (M8-A2/M6-A6).
+    return false;
+  }
+  if (impl_->reach_ == detail::DomainImpl::Reach::kPosixShm) {
+    // The honestly-partial P1b matrix (design.md; rationale per contract in
+    // detail/posix_shm.hpp). M6-A6 asserts this table verbatim.
+    switch (contract) {
+      case Contract::kLatestOnly:
+      case Contract::kBoundedQueue:
+      case Contract::kLateJoinWarmStart:
+      case Contract::kDeadline:
+        return true;
+      case Contract::kReliableQueue:
+      case Contract::kZeroCopyLoan:
+      case Contract::kRequestResponse:
+      case Contract::kSharedOwnership:
+        return false;
+    }
+    return false;
+  }
   // The in-process reach is the reference semantics: every portable
   // contract is honored natively (design.md support matrix, first column).
-  // Unavailable-backend domains support nothing (M8-A2/M6-A6).
-  return impl_ != nullptr && impl_->available();
+  (void)contract;
+  return true;
 }
 
 WaitStatus Domain::WaitUntilMatched(

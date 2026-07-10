@@ -301,3 +301,86 @@ TEST(M1Behavioral, A5_CounterReconciliation) {
   EXPECT_EQ(msg::introspect::TakeCount(sub), ground_truth_takes);
   EXPECT_EQ(unique_seen + msg::introspect::OverwriteCount(sub), kPublished);
 }
+
+// ============================================================================
+// P1b: the M1 contract across a REAL process boundary (POSIX-shm reach).
+// Producer is a forked+exec'd child (shm_test_helper); the consumer side —
+// conservation, staleness, counters — is this process. Same acceptance
+// criteria, different reach (the M6-A1 spirit applied to M1's cross-process
+// leg). TSan note: cross-process shm races are invisible to TSan (see
+// shm_test_support.hpp); the ASan leg covers mapping/bounds bugs.
+// ============================================================================
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+
+#include "shm_test_support.hpp"
+
+TEST(M1Behavioral, ShmCrossProcess_ConservationAndStaleness) {
+  const std::string domain_name = shmtest::UniqueDomainName("m1shm");
+  shmtest::SegmentJanitor janitor(domain_name, {"m1.plan.head"});
+
+  // Subscribe FIRST (order independence, M14-A1: the segment is created by
+  // whoever arrives first — here the subscriber).
+  auto domain = msg::Domain::PosixShm({.name = domain_name});
+  auto sub = domain.Subscribe<ShmTestPlan>(
+      "m1.plan.head",
+      {.history = msg::History::LatestOnly(), .deadline = 250ms});
+  ASSERT_EQ(sub.status(), msg::SubscribeStatus::kOk);
+
+  constexpr std::uint64_t kPublished = 500;
+  shmtest::ChildGuard producer(shmtest::SpawnHelper(
+      {"publish_stream", domain_name, "m1.plan.head", "1",
+       std::to_string(kPublished), "500"}));  // 500 us period
+  ASSERT_GT(producer.pid(), 0);
+
+  // Consume at the parent's own cadence while the child streams (D5): count
+  // unique values, verify none is torn or phantom (A1/A2 cross-process).
+  std::uint64_t unique_seen = 0;
+  std::uint64_t last_id = 0;
+  bool phantom = false;
+  bool out_of_order = false;
+  const auto consume_once = [&] {
+    auto plan = sub.TakeLatest();
+    if (plan.freshness() == msg::Freshness::kNone) {
+      return;
+    }
+    const std::uint64_t id = (*plan).plan_id;
+    if (id == 0 || id > kPublished || !ShmPlanConsistent(*plan)) {
+      phantom = true;
+    }
+    if (id < last_id) {
+      out_of_order = true;
+    }
+    if (id != last_id) {
+      ++unique_seen;
+      last_id = id;
+    }
+  };
+  // Bounded consumption: the child exits after kPublished publishes.
+  const auto consume_deadline = xmotion::Now() + 30s;
+  while (last_id < kPublished && xmotion::Now() < consume_deadline) {
+    consume_once();
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  EXPECT_EQ(producer.Reap(), 0) << "producer child failed";
+  consume_once();  // final drain: the newest value is the last published
+
+  ASSERT_FALSE(phantom) << "torn or phantom value across the process boundary";
+  ASSERT_FALSE(out_of_order) << "latest-only must never go backwards";
+  ASSERT_EQ(last_id, kPublished);
+
+  // A1/A5 conservation, exactly, via the SHARED slot counters (D9): every
+  // published value was seen once or counted overwritten.
+  EXPECT_EQ(unique_seen + msg::introspect::OverwriteCount(sub), kPublished);
+
+  // A3 staleness: the producer is gone; the deadline verdict must raise.
+  std::this_thread::sleep_for(300ms);
+  auto stale = sub.TakeLatest();
+  EXPECT_EQ(stale.freshness(), msg::Freshness::kStale);
+  EXPECT_EQ((*stale).plan_id, kPublished);
+  EXPECT_GE(stale.age(), 250ms);
+
+  // The graceful exit released the publisher slot: observable (M4-A4 kin).
+  EXPECT_EQ(sub.MatchedCount(), 0u);
+}
+
+#endif  // XMMESSAGING_HAS_POSIX_SHM

@@ -895,16 +895,21 @@ class DomainImpl {
  public:
   enum class Reach : std::uint8_t { kInProcess, kPosixShm, kIceoryx2, kZenoh };
 
-  DomainImpl(Reach reach, std::shared_ptr<DomainState> state)
-      : reach_(reach), state_(std::move(state)) {}
+  DomainImpl(Reach reach, std::shared_ptr<DomainState> state,
+             std::string shm_key = {})
+      : reach_(reach), state_(std::move(state)), shm_key_(std::move(shm_key)) {}
 
   // A backend not compiled into this build yields a Domain with no state:
   // endpoints carry kUnsupportedReach (M8-A2) — never a silent in-process
-  // fallback.
-  bool available() const noexcept { return state_ != nullptr; }
+  // fallback. The POSIX-shm reach (P1b) carries no in-process registry —
+  // its "registry" IS /dev/shm, keyed by shm_key_ (D17).
+  bool available() const noexcept {
+    return state_ != nullptr || !shm_key_.empty();
+  }
 
   const Reach reach_;
-  const std::shared_ptr<DomainState> state_;
+  const std::shared_ptr<DomainState> state_;  // in-process registry only
+  const std::string shm_key_;                 // P1b isolation key (D17/§6.2)
 };
 
 // ---------------------------------------------------------------------------
@@ -912,6 +917,12 @@ class DomainImpl {
 // surface needs); Pub/SubImpl add the typed cores and unregister in their
 // destructors (D7: teardown is scope exit).
 // ---------------------------------------------------------------------------
+// Which transport machinery sits behind an endpoint handle. The typed verb
+// definitions below dispatch on it with one predictable branch — cheaper
+// than a virtual call on the hot path, and it compiles out entirely when
+// the shm backend is not built.
+enum class EndpointBackend : std::uint8_t { kInProcess, kPosixShm };
+
 class EndpointImpl {
  public:
   EndpointImpl() = default;
@@ -919,7 +930,10 @@ class EndpointImpl {
   EndpointImpl(const EndpointImpl&) = delete;
   EndpointImpl& operator=(const EndpointImpl&) = delete;
 
-  std::size_t MatchedCount() const noexcept {
+  // Virtual: the shm impls count peers from the segment's liveness slots
+  // (posix_shm.hpp); this default body is the in-process registry count.
+  // A readiness verb (D16), never the hot path.
+  virtual std::size_t MatchedCount() const noexcept {
     const TopicBase* topic = topic_.get();
     if (topic == nullptr) {
       return 0;
@@ -932,6 +946,7 @@ class EndpointImpl {
   std::shared_ptr<DomainState> state_{};
   std::shared_ptr<TopicBase> topic_{};
   bool is_publisher_ = false;
+  EndpointBackend backend_ = EndpointBackend::kInProcess;
   AdvertiseStatus advertise_status_ = AdvertiseStatus::kUnsupportedReach;
   SubscribeStatus subscribe_status_ = SubscribeStatus::kUnsupportedReach;
 };
@@ -1008,6 +1023,18 @@ class ClientImpl final : public EndpointImpl {
 };
 
 }  // namespace detail
+}  // namespace messaging
+}  // namespace xmotion
+
+// P1b: the POSIX shm fallback backend — typed segment attachments and the
+// Shm{Pub,Sub}Impl endpoint impls the dispatch branches below route to.
+// Needs EndpointImpl/LoanPool/DerivedInfo above; compiled out (and every
+// dispatch branch with it) when the backend option is off. Included between
+// namespace blocks: it opens its own (and pulls in system headers).
+#include "xmmessaging/detail/posix_shm.hpp"
+
+namespace xmotion {
+namespace messaging {
 
 // ===========================================================================
 // Template member definitions for the portable API (declared in domain.hpp
@@ -1025,9 +1052,26 @@ Publisher<T> Domain::Advertise(std::string_view topic, const Qos& qos) {
                 "default-constructible and copy-assignable (fan-out by copy; "
                 "Sample<T> is value-semantic)");
   Publisher<T> handle;
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if (impl_ != nullptr && impl_->reach_ == detail::DomainImpl::Reach::kPosixShm &&
+      !impl_->shm_key_.empty()) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      handle.impl_ =
+          detail::ShmAdvertiseImpl<T>(impl_->shm_key_, topic, qos).release();
+    } else {
+      // The shm payload floor (trivially copyable — the record crosses a
+      // process boundary through the seqlock words) is a per-reach
+      // requirement: a wiring STATUS, not a compile error (D19/M6-A4).
+      auto refused = std::make_unique<detail::PubImpl<T>>();
+      refused->is_publisher_ = true;  // status stays kUnsupportedReach
+      handle.impl_ = refused.release();
+    }
+    return handle;
+  }
+#endif
   auto impl = std::make_unique<detail::PubImpl<T>>();
   impl->is_publisher_ = true;
-  if (impl_ != nullptr && impl_->available()) {
+  if (impl_ != nullptr && impl_->state_ != nullptr) {
     auto state = impl_->state_;
     std::lock_guard<std::mutex> lock(state->mutex_);
     auto& entry = state->topics_[std::string(topic)];
@@ -1063,8 +1107,20 @@ Subscriber<T> Domain::Subscribe(std::string_view topic, const Qos& qos) {
                 "default-constructible and copy-assignable (fan-out by copy; "
                 "Sample<T> is value-semantic)");
   Subscriber<T> handle;
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if (impl_ != nullptr && impl_->reach_ == detail::DomainImpl::Reach::kPosixShm &&
+      !impl_->shm_key_.empty()) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      handle.impl_ =
+          detail::ShmSubscribeImpl<T>(impl_->shm_key_, topic, qos).release();
+    } else {
+      handle.impl_ = new detail::SubImpl<T>();  // kUnsupportedReach (D19)
+    }
+    return handle;
+  }
+#endif
   auto impl = std::make_unique<detail::SubImpl<T>>();
-  if (impl_ != nullptr && impl_->available()) {
+  if (impl_ != nullptr && impl_->state_ != nullptr) {
     auto state = impl_->state_;
     std::lock_guard<std::mutex> lock(state->mutex_);
     auto& entry = state->topics_[std::string(topic)];
@@ -1132,9 +1188,9 @@ Publisher<T>::~Publisher() = default;
 template <typename T>
 AdvertiseStatus Publisher<T>::status() const noexcept {
   // A moved-from handle reads as kUnsupportedReach (it can serve nothing).
-  return impl_ != nullptr
-             ? static_cast<const detail::PubImpl<T>*>(impl_)->advertise_status_
-             : AdvertiseStatus::kUnsupportedReach;
+  // Read through the base: the impl may be in-process or shm (P1b).
+  return impl_ != nullptr ? impl_->advertise_status_
+                          : AdvertiseStatus::kUnsupportedReach;
 }
 
 template <typename T>
@@ -1145,6 +1201,28 @@ Loan<T> Publisher<T>::Loan() {
                 "xmMessaging: Loan (zero-copy publication) requires a "
                 "trivially-copyable payload (design.md QoS 'Loan', M6-A4)");
   ::xmotion::messaging::Loan<T> loan;
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if (impl_ != nullptr &&
+      impl_->backend_ == detail::EndpointBackend::kPosixShm) {
+    // P1b: the Loan VERB works (publisher-side scratch cell, publish
+    // copies); the zero-copy CONTRACT is a declared divergence — see the
+    // support matrix in posix_shm.hpp (Supports(kZeroCopyLoan) == false).
+    auto* shm_impl = static_cast<detail::ShmPubImpl<T>*>(impl_);
+    assert(shm_impl->advertise_status_ == AdvertiseStatus::kOk &&
+           "xmMessaging: Loan() on a non-kOk Publisher is a contract "
+           "violation (D18)");
+    if (shm_impl->advertise_status_ != AdvertiseStatus::kOk) {
+      return loan;  // kExhausted
+    }
+    T* shm_slot = shm_impl->pool.Acquire();
+    if (shm_slot != nullptr) {
+      loan.slot_ = shm_slot;
+      loan.pool_ = &shm_impl->pool;
+      loan.status_ = LoanStatus::kOk;
+    }
+    return loan;
+  }
+#endif
   auto* impl = static_cast<detail::PubImpl<T>*>(impl_);
   assert(impl != nullptr &&
          impl->advertise_status_ == AdvertiseStatus::kOk &&
@@ -1164,6 +1242,25 @@ Loan<T> Publisher<T>::Loan() {
 
 template <typename T>
 PublishStatus Publisher<T>::Publish(const T& value) {
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  // One predictable branch on the hot path; compiles out with the backend.
+  // The if constexpr guard keeps non-trivially-copyable payloads (which can
+  // never carry a shm impl — see Advertise) from instantiating the shm
+  // machinery.
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (impl_ != nullptr &&
+        impl_->backend_ == detail::EndpointBackend::kPosixShm) {
+      auto* shm_impl = static_cast<detail::ShmPubImpl<T>*>(impl_);
+      assert(shm_impl->advertise_status_ == AdvertiseStatus::kOk &&
+             "xmMessaging: Publish on a non-kOk Publisher is a contract "
+             "violation (D18)");
+      if (shm_impl->attachment_ == nullptr) {
+        return PublishStatus::kOk;  // contract violation; safe no-op
+      }
+      return shm_impl->Publish(value, nullptr);
+    }
+  }
+#endif
   auto* impl = static_cast<detail::PubImpl<T>*>(impl_);
   assert(impl != nullptr &&
          impl->advertise_status_ == AdvertiseStatus::kOk &&
@@ -1216,6 +1313,23 @@ PublishStatus Publisher<T>::PublishDerived(
     info.hops = max_hops >= 65535u ? 65535u : max_hops + 1u;
   }
 
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (impl_ != nullptr &&
+        impl_->backend_ == detail::EndpointBackend::kPosixShm) {
+      auto* shm_impl = static_cast<detail::ShmPubImpl<T>*>(impl_);
+      assert(shm_impl->advertise_status_ == AdvertiseStatus::kOk &&
+             "xmMessaging: PublishDerived on a non-kOk Publisher is a "
+             "contract violation (D18)");
+      ::xmotion::messaging::Loan<T> shm_consumed(std::move(loan));
+      if (shm_impl->attachment_ == nullptr || shm_consumed.slot_ == nullptr) {
+        return PublishStatus::kOk;
+      }
+      return shm_impl->Publish(*shm_consumed.slot_,
+                               has_upstream ? &info : nullptr);
+    }
+  }
+#endif
   auto* impl = static_cast<detail::PubImpl<T>*>(impl_);
   assert(impl != nullptr &&
          impl->advertise_status_ == AdvertiseStatus::kOk &&
@@ -1241,13 +1355,28 @@ Subscriber<T>::~Subscriber() = default;
 
 template <typename T>
 SubscribeStatus Subscriber<T>::status() const noexcept {
-  return impl_ != nullptr
-             ? static_cast<const detail::SubImpl<T>*>(impl_)->subscribe_status_
-             : SubscribeStatus::kUnsupportedReach;
+  // Read through the base: the impl may be in-process or shm (P1b).
+  return impl_ != nullptr ? impl_->subscribe_status_
+                          : SubscribeStatus::kUnsupportedReach;
 }
 
 template <typename T>
 Sample<T> Subscriber<T>::TakeLatest() {
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (impl_ != nullptr &&
+        impl_->backend_ == detail::EndpointBackend::kPosixShm) {
+      auto* shm_impl = static_cast<detail::ShmSubImpl<T>*>(impl_);
+      assert(shm_impl->subscribe_status_ == SubscribeStatus::kOk &&
+             "xmMessaging: TakeLatest on a non-kOk Subscriber is a contract "
+             "violation (D18)");
+      if (shm_impl->attachment_ == nullptr) {
+        return Sample<T>();  // kNone: safe no-op in release
+      }
+      return shm_impl->TakeLatestSample();
+    }
+  }
+#endif
   Sample<T> sample;  // kNone until proven otherwise (D1/D2)
   auto* impl = static_cast<detail::SubImpl<T>*>(impl_);
   if (impl == nullptr || impl->core_ == nullptr) {
@@ -1326,6 +1455,21 @@ Sample<T> Subscriber<T>::TakeLatest() {
 
 template <typename T>
 Sample<T> Subscriber<T>::TryTake() {
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (impl_ != nullptr &&
+        impl_->backend_ == detail::EndpointBackend::kPosixShm) {
+      auto* shm_impl = static_cast<detail::ShmSubImpl<T>*>(impl_);
+      assert(shm_impl->subscribe_status_ == SubscribeStatus::kOk &&
+             "xmMessaging: TryTake on a non-kOk Subscriber is a contract "
+             "violation (D18)");
+      if (shm_impl->attachment_ == nullptr) {
+        return Sample<T>();  // kNone: safe no-op in release
+      }
+      return shm_impl->TryTakeSample();
+    }
+  }
+#endif
   Sample<T> sample;  // kNone when empty (D5: never blocks)
   auto* impl = static_cast<detail::SubImpl<T>*>(impl_);
   if (impl == nullptr || impl->core_ == nullptr) {
@@ -1392,7 +1536,10 @@ Server<Req, Rsp> Domain::Serve(std::string_view topic) {
   Server<Req, Rsp> handle;
   auto impl = std::make_unique<detail::ServerImpl<Req, Rsp>>();
   impl->is_publisher_ = true;  // matching: a server is the topic's one peer
-  if (impl_ != nullptr && impl_->available()) {
+  // state_ == nullptr covers both "backend not built" (M8-A2) and the P1b
+  // POSIX-shm reach, where RPC is a declared divergence (Supports() says
+  // no; the handle carries kUnsupportedReach — the D19 pattern).
+  if (impl_ != nullptr && impl_->state_ != nullptr) {
     auto state = impl_->state_;
     std::lock_guard<std::mutex> lock(state->mutex_);
     auto& entry = state->topics_[std::string(topic)];
@@ -1432,7 +1579,8 @@ Client<Req, Rsp> Domain::Client(std::string_view topic) {
                 "them by copy; Request/Result are value-semantic)");
   ::xmotion::messaging::Client<Req, Rsp> handle;
   auto impl = std::make_unique<detail::ClientImpl<Req, Rsp>>();
-  if (impl_ != nullptr && impl_->available()) {
+  // See Serve: nullptr state_ includes the P1b shm reach (RPC divergence).
+  if (impl_ != nullptr && impl_->state_ != nullptr) {
     auto state = impl_->state_;
     std::lock_guard<std::mutex> lock(state->mutex_);
     auto& entry = state->topics_[std::string(topic)];
@@ -1551,12 +1699,23 @@ Result<Rsp> Client<Req, Rsp>::Call(const Req& request, Duration deadline) {
 }
 
 // ---- introspect (D9) -------------------------------------------------------
+// Shm endpoints read the SHARED slot atomics (posix_shm.hpp): the same
+// counters any process mapping the segment sees — the exact-reconciliation
+// contract (M3-A2) holds across the process boundary.
 namespace introspect {
 
 template <typename T>
 std::uint64_t DropCount(const Subscriber<T>& subscriber) {
-  auto* impl = static_cast<detail::SubImpl<T>*>(
-      detail::EndpointAccess::Get(subscriber));
+  auto* base = detail::EndpointAccess::Get(subscriber);
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (base != nullptr &&
+        base->backend_ == detail::EndpointBackend::kPosixShm) {
+      return static_cast<detail::ShmSubImpl<T>*>(base)->DropCountNow();
+    }
+  }
+#endif
+  auto* impl = static_cast<detail::SubImpl<T>*>(base);
   return (impl != nullptr && impl->core_ != nullptr)
              ? impl->core_->drop_count.load(std::memory_order_relaxed)
              : 0;
@@ -1564,8 +1723,16 @@ std::uint64_t DropCount(const Subscriber<T>& subscriber) {
 
 template <typename T>
 std::uint64_t OverwriteCount(const Subscriber<T>& subscriber) {
-  auto* impl = static_cast<detail::SubImpl<T>*>(
-      detail::EndpointAccess::Get(subscriber));
+  auto* base = detail::EndpointAccess::Get(subscriber);
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (base != nullptr &&
+        base->backend_ == detail::EndpointBackend::kPosixShm) {
+      return static_cast<detail::ShmSubImpl<T>*>(base)->OverwriteCountNow();
+    }
+  }
+#endif
+  auto* impl = static_cast<detail::SubImpl<T>*>(base);
   return (impl != nullptr && impl->core_ != nullptr)
              ? impl->core_->overwrite_count.load(std::memory_order_relaxed)
              : 0;
@@ -1573,8 +1740,16 @@ std::uint64_t OverwriteCount(const Subscriber<T>& subscriber) {
 
 template <typename T>
 std::uint64_t TakeCount(const Subscriber<T>& subscriber) {
-  auto* impl = static_cast<detail::SubImpl<T>*>(
-      detail::EndpointAccess::Get(subscriber));
+  auto* base = detail::EndpointAccess::Get(subscriber);
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (base != nullptr &&
+        base->backend_ == detail::EndpointBackend::kPosixShm) {
+      return static_cast<detail::ShmSubImpl<T>*>(base)->TakeCountNow();
+    }
+  }
+#endif
+  auto* impl = static_cast<detail::SubImpl<T>*>(base);
   return (impl != nullptr && impl->core_ != nullptr)
              ? impl->core_->take_count.load(std::memory_order_relaxed)
              : 0;
@@ -1582,8 +1757,17 @@ std::uint64_t TakeCount(const Subscriber<T>& subscriber) {
 
 template <typename T>
 std::uint64_t PublishCount(const Publisher<T>& publisher) {
-  auto* impl =
-      static_cast<detail::PubImpl<T>*>(detail::EndpointAccess::Get(publisher));
+  auto* base = detail::EndpointAccess::Get(publisher);
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (base != nullptr &&
+        base->backend_ == detail::EndpointBackend::kPosixShm) {
+      return static_cast<detail::ShmPubImpl<T>*>(base)->publish_count.load(
+          std::memory_order_relaxed);
+    }
+  }
+#endif
+  auto* impl = static_cast<detail::PubImpl<T>*>(base);
   return (impl != nullptr && impl->core_ != nullptr)
              ? impl->core_->publish_count.load(std::memory_order_relaxed)
              : 0;
@@ -1591,8 +1775,17 @@ std::uint64_t PublishCount(const Publisher<T>& publisher) {
 
 template <typename T>
 std::uint64_t RefusedCount(const Publisher<T>& publisher) {
-  auto* impl =
-      static_cast<detail::PubImpl<T>*>(detail::EndpointAccess::Get(publisher));
+  auto* base = detail::EndpointAccess::Get(publisher);
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+  if constexpr (std::is_trivially_copyable_v<T>) {
+    if (base != nullptr &&
+        base->backend_ == detail::EndpointBackend::kPosixShm) {
+      return static_cast<detail::ShmPubImpl<T>*>(base)->refused_count.load(
+          std::memory_order_relaxed);
+    }
+  }
+#endif
+  auto* impl = static_cast<detail::PubImpl<T>*>(base);
   return (impl != nullptr && impl->core_ != nullptr)
              ? impl->core_->refused_count.load(std::memory_order_relaxed)
              : 0;

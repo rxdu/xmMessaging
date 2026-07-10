@@ -329,3 +329,50 @@ TEST(M2Behavioral, D6_MidStreamJoinAccountingRace) {
   go.store(-1, std::memory_order_release);
   publisher.join();
 }
+
+// ============================================================================
+// P1b: M2 late join across a REAL process boundary (POSIX-shm reach) — and
+// the strongest form of D6 warm start this backend enables: the value lives
+// in the named segment, so a late joiner warm-starts even after the
+// PUBLISHER PROCESS IS GONE, with the original stamp (age never lies, R8).
+// ============================================================================
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+
+#include "shm_test_support.hpp"
+
+TEST(M2Behavioral, ShmCrossProcess_WarmStartWithOriginalStamp) {
+  const std::string domain_name = shmtest::UniqueDomainName("m2shm");
+  shmtest::SegmentJanitor janitor(domain_name, {"m2.robot.state"});
+
+  // The producer publishes ONE value and exits — before the subscriber
+  // even exists (M14-A1 order independence, plus publisher death).
+  shmtest::ChildGuard producer(shmtest::SpawnHelper(
+      {"publish_once", domain_name, "m2.robot.state", "7"}));
+  ASSERT_GT(producer.pid(), 0);
+  ASSERT_EQ(producer.Reap(), 0) << "producer child failed";
+
+  std::this_thread::sleep_for(300ms);  // the value ages in the segment
+
+  // Late joiner: first take yields the current value without waiting for a
+  // next publish (there will never be one), with its ORIGINAL stamp (M2-A1).
+  auto domain = msg::Domain::PosixShm({.name = domain_name});
+  auto late = domain.Subscribe<ShmTestPlan>(
+      "m2.robot.state", {.history = msg::History::LatestOnly()});
+  ASSERT_EQ(late.status(), msg::SubscribeStatus::kOk);
+
+  auto warm = late.TakeLatest();
+  ASSERT_EQ(warm.freshness(), msg::Freshness::kFresh);  // no deadline declared
+  EXPECT_EQ((*warm).plan_id, 7u);
+  EXPECT_TRUE(ShmPlanConsistent(*warm));
+  // The stamp is the dead publisher's publish time — same host, same
+  // monotonic clock (R8): age reports the true ~300 ms, never ~0 (D6).
+  EXPECT_GE(warm.age(), 300ms);
+  EXPECT_LT(warm.age(), 10s);
+  EXPECT_EQ(warm.age_class(), msg::AgeClass::kMeasured);
+
+  // D6 accounting: the warm-start seed is pre-join history — returned but
+  // never charged (no publish ever delivered into this mailbox).
+  EXPECT_EQ(msg::introspect::OverwriteCount(late), 0u);
+}
+
+#endif  // XMMESSAGING_HAS_POSIX_SHM

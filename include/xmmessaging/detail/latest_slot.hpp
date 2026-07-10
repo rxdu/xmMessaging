@@ -47,9 +47,10 @@
  * in-process payloads use MutexLatestSlot below — see its comment for the
  * stated divergence.
  *
- * Placement provides the cell storage (heap now, shared mapping at P1b);
+ * Placement provides the cell storage (heap in-process; a shared mapping
+ * for the P1b POSIX-shm backend — same algorithm, zero changes below);
  * Waiter is carried for the parking verbs (never touched by Store/Load) —
- * see placement.hpp / waiter.hpp for the P1b reuse seam.
+ * see placement.hpp / waiter.hpp for the reuse seam.
  *
  * detail/: not part of the portable API surface.
  *
@@ -94,12 +95,32 @@ class LatestSlot {
                 "LatestSlot requires a trivially copyable record (the "
                 "seqlock copies words); non-trivially-copyable payloads use "
                 "MutexLatestSlot");
+  // P1b: the same cell type is placed inside shared mappings, where the
+  // atomics must be address-free — guaranteed iff always lock-free
+  // ([atomics.lockfree]/4), which holds on both tested baselines (R1).
+  static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                "shm-capable seqlock requires lock-free (address-free) "
+                "64-bit atomics");
 
-  LatestSlot() : cell_(Placement::template MakeSingle<Cell>()) {
-    // Explicit zero-init: an even, zero sequence means "never written".
-    cell_->seq.store(0, std::memory_order_relaxed);
-    for (std::size_t i = 0; i < kWords; ++i) {
-      cell_->words[i].store(0, std::memory_order_relaxed);
+  // Bytes of placed storage one slot consumes — the P1b segment-layout
+  // computation needs it (posix_shm.hpp); every process derives the same
+  // value from the same T, which is what makes offsets a pure function of
+  // the payload type.
+  static constexpr std::size_t StorageBytes() noexcept { return sizeof(Cell); }
+
+  // The placement instance decides WHERE the cell lives (heap vs a shared
+  // mapping) and WHETHER this constructor initializes it. Heap placement
+  // always initializes; a shm ATTACHER must not (P1b: the cell may already
+  // hold live data — the warm-start value that survives a publisher
+  // restart). The Store/Load algorithm below is placement-blind.
+  explicit LatestSlot(Placement placement = Placement())
+      : cell_(placement.template MakeSingle<Cell>()) {
+    if (placement.Initialize()) {
+      // Explicit zero-init: an even, zero sequence means "never written".
+      cell_->seq.store(0, std::memory_order_relaxed);
+      for (std::size_t i = 0; i < kWords; ++i) {
+        cell_->words[i].store(0, std::memory_order_relaxed);
+      }
     }
   }
 
@@ -149,6 +170,58 @@ class LatestSlot {
     }
     std::memcpy(&out, staged, sizeof(Record));
     return true;
+  }
+
+  // P1b bounded read for the CROSS-PROCESS reach, where the writer can be
+  // SIGKILLed mid-Store (impossible in-process: threads die with their
+  // process). Same algorithm and ordering pairs as Load(); the only
+  // difference is a retry budget so a dead writer's permanently-odd
+  // sequence is DETECTED (kStalled) instead of spun on forever — the
+  // "skippable sequence" half of the M4 crash story. kStalled can also
+  // fire under pathological live-writer pressure (max_retries consecutive
+  // overwrites during one read); the caller's fallback (the last value it
+  // already took) is correct in both cases, because a value that never
+  // finished its Store was never published.
+  enum class LoadResult : std::uint8_t { kValue, kEmpty, kStalled };
+
+  LoadResult LoadBounded(Record& out,
+                         std::uint32_t max_retries) const noexcept {
+    const Cell& c = *cell_;
+    std::uint64_t staged[kWords];
+    for (std::uint32_t attempt = 0; attempt <= max_retries; ++attempt) {
+      const std::uint64_t s1 = c.seq.load(std::memory_order_acquire);  // (R1)
+      if (s1 == 0) {
+        return LoadResult::kEmpty;  // never written (or crash-repaired)
+      }
+      if ((s1 & 1u) != 0u) {  // write in progress — or writer died mid-store
+        CpuRelax();
+        continue;
+      }
+      for (std::size_t i = 0; i < kWords; ++i) {
+        staged[i] = c.words[i].load(std::memory_order_relaxed);
+      }
+      std::atomic_thread_fence(std::memory_order_acquire);             // (R2)
+      if (c.seq.load(std::memory_order_relaxed) == s1) {
+        std::memcpy(&out, staged, sizeof(Record));
+        return LoadResult::kValue;
+      }
+      CpuRelax();
+    }
+    return LoadResult::kStalled;
+  }
+
+  // P1b crash repair — wiring path of a (re)claiming WRITER only, while it
+  // is provably the slot's sole writer (the publisher-liveness claim in
+  // shm_segment.hpp). A writer SIGKILLed mid-Store left seq odd and the
+  // words half-written; the in-flight value was never published, so the
+  // honest repair is "never written": readers fall back to their own last
+  // taken value (staleness keeps rising — M4-A1), and the next Store
+  // starts a fresh even/odd cycle.
+  void RepairAfterWriterCrash() noexcept {
+    Cell& c = *cell_;
+    if ((c.seq.load(std::memory_order_relaxed) & 1u) != 0u) {
+      c.seq.store(0, std::memory_order_release);
+    }
   }
 
   // Parking seam (WaitUntilMatched-class verbs only; NEVER touched by

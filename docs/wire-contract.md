@@ -269,23 +269,56 @@ segment = 1*( %x61-7A / %x30-39 / "_" )   ; lowercase a-z, 0-9, underscore
 
 ### 6.2 Domain isolation key
 
-Every backend resource a domain creates — topics/services, shm segments, introspection segments — MUST be namespaced by the domain's **isolation key**, so two domains on one host share nothing and cross-domain visibility is only ever explicit (composition-scale contract, design.md). The key is a string satisfying the `segment` grammar above. Default derivation is from the effective user plus the configured domain name; the exact derivation (separator, hashing/truncation for length-limited backend namespaces) is **TBD (P1)** and will be specified here, since a foreign participant must reproduce it to land in the same domain.
+Every backend resource a domain creates — topics/services, shm segments, introspection segments — MUST be namespaced by the domain's **isolation key**, so two domains on one host share nothing and cross-domain visibility is only ever explicit (composition-scale contract, design.md). **Resolved (P1b).** The key is dot-separated `segment`s (same grammar as topics), derived as:
+
+```
+key            = "u" euid-decimal "." sanitized-name
+euid-decimal   = 1*DIGIT                ; getuid()/geteuid(), no leading zeros
+sanitized-name = 1*( %x61-7A / %x30-39 / "_" )
+```
+
+- `sanitized-name` is the configured domain name (default `default` when none is configured) with uppercase ASCII folded to lowercase and every other byte outside `[a-z0-9_]` replaced by `_`.
+- The **numeric euid** (not the login name) keeps the derivation deterministic and passwd-free; a foreign participant reproduces it from `getuid()` alone.
+- Example: euid 1000, domain name `Nav-Stack` → key `u1000.nav_stack`.
+
+Backend resource names prefix this key; the POSIX-shm mapping is normative in §6.4. When a backend's namespace length limit would be exceeded by a derived resource name, the over-long name degrades to the hashed form defined where that backend's naming is specified (POSIX shm: §6.4).
 
 ### 6.3 Per-backend mapping of the five QoS knobs
 
 The in-process reach defines the reference semantics (design.md); each backend column states how the portable contract is realized, or names the divergence recorded in the R3 support matrix. Backend columns are structural placeholders until the backend is integrated.
 
-| Knob | Portable contract | iceoryx2 **(TBD, P1)** | POSIX-shm fallback **(TBD, P1)** | Zenoh **(TBD, P2)** |
+| Knob | Portable contract | iceoryx2 **(TBD, P1)** | POSIX-shm fallback **(resolved, P1b)** | Zenoh **(TBD, P2)** |
 |---|---|---|---|---|
-| History `latest-only` | LatestMailbox: overwrite, newest-or-nothing, never torn | subscriber buffer depth 1, overwrite-on-full | writer-progress-only seqlock slot | keep newest sample per key |
-| History `queue<N>` | bounded FIFO, depth from QoS | buffer depth N | shared ring, depth N | TBD |
-| Reliability `best-effort` | overflow drops, always counted | TBD | drop + counter | TBD |
-| Reliability `reliable` | overflow back-pressures via explicit status | TBD | later or declared divergence (`Supports()` = no) | TBD |
-| Deadline | consumer-side staleness bound from envelope stamps (§2, R8 rule) | portable-layer, from envelope | portable-layer, from envelope | portable-layer; cross-host advisory unless ClockDomain declared |
-| Loan | zero-copy publish for conforming payloads | native loan | construct in shared mapping | divergence: copy + serialize |
-| Ownership `exclusive`/`shared` | second `Advertise` refused / last-writer-wins by publish stamp | TBD | TBD | TBD |
+| History `latest-only` | LatestMailbox: overwrite, newest-or-nothing, never torn | subscriber buffer depth 1, overwrite-on-full | writer-progress-only seqlock slot per subscriber + a master slot (§6.4) | keep newest sample per key |
+| History `queue<N>` | bounded FIFO, depth from QoS | buffer depth N | per-subscriber shared SPSC ring, depth N ≤ 16 (the per-slot reservation, §6.4); N > 16 refused at wiring, never clamped | TBD |
+| Reliability `best-effort` | overflow drops, always counted | TBD | drop-newest + shared per-subscriber drop counter (publisher-counted, subscriber-readable) | TBD |
+| Reliability `reliable` | overflow back-pressures via explicit status | TBD | **declared divergence** (`Supports()` = no; `Advertise` refused) — cross-process all-or-nothing needs a pre-check spanning peer-owned rings, deferred | TBD |
+| Deadline | consumer-side staleness bound from envelope stamps (§2, R8 rule) | portable-layer, from envelope | portable-layer, from envelope; same host ⇒ measured (never advisory) | portable-layer; cross-host advisory unless ClockDomain declared |
+| Loan | zero-copy publish for conforming payloads | native loan | **declared divergence** (`Supports(kZeroCopyLoan)` = no): the `Loan` verb works but publication copies through the seqlock's atomic words — that copy is what makes reads crash-safe | divergence: copy + serialize |
+| Ownership `exclusive`/`shared` | second `Advertise` refused / last-writer-wins by publish stamp | TBD | `exclusive` enforced via the segment's publisher-liveness slot (pid CAS + ESRCH reclaim, §6.4); `shared` is a **declared divergence** (`Supports()` = no; refused) — no robust cross-process writer serialization by design | TBD |
+| Request/response | typed Client/Server with mandatory deadline | native (≥ 0.6) | **declared divergence** (`Supports(kRequestResponse)` = no; `Serve`/`Client` handles carry the unsupported-reach status) — later or never (design.md) | queryables |
 
-How a topic name plus domain key maps to the backend's native resource name (iceoryx2 service name, Zenoh key expression, shm object path) is part of this section and is **TBD per backend (P1/P2)** — a foreign participant needs it to rendezvous, so each backend's integration is not complete until its column and naming rule land here.
+How a topic name plus domain key maps to the backend's native resource name (iceoryx2 service name, Zenoh key expression) is part of this section and is **TBD per backend (P1/P2)** — a foreign participant needs it to rendezvous, so each backend's integration is not complete until its column and naming rule land here. The POSIX-shm rule is §6.4.
+
+### 6.4 POSIX-shm resource naming & per-topic segment (resolved, P1b)
+
+**Object name.** One named shared-memory object per topic:
+
+```
+/xmmsg.<isolation-key>.<sanitized-topic>
+```
+
+where `<isolation-key>` is §6.2 and `<sanitized-topic>` applies §6.2's sanitizer with `.` additionally preserved. If the name (excluding the leading `/`) exceeds **240 bytes**, the whole name degrades to `/xmmsg.h` + 16 **lowercase** hex digits of FNV-1a-64 (§4.1) over the over-long name — unreadable but collision-safe and reproducible from this spec.
+
+**Creation & rendezvous.** `shm_open` with `O_CREAT|O_EXCL` decides one creator per name (order-independent wiring, whoever arrives first); attachers poll (bounded) for the segment to reach its declared size and for the header's init flag, then validate magic, layout version, envelope version, schema hash, payload size/alignment, and total size — a schema-hash mismatch is the R6 refusal, any other mismatch refuses attachment. `shm_open` (not `memfd_create`) is deliberate: independent processes must rendezvous **by name** with no common ancestor and no broker to pass fds (daemonless, M4).
+
+**Segment contents.** A fixed header (identity, publisher liveness slot with pid + generation counter, the topic's ordinal counter — which survives publisher crashes, so a restarted publisher resumes the ordinal sequence — a cross-process futex word, and 16 subscriber slots carrying pid/state/history-shape plus the D9 counters as shared atomics), followed by the data plane: one master latest-only slot (the late-join warm-start source; it survives publisher death) and 16 per-subscriber regions (a seqlock slot **and** an SPSC ring reservation of 16 records each; tmpfs allocates pages on first touch, so unused reservation costs no RAM). The header layout version gates interpretation with the same refuse-unknown rule as the envelope version byte.
+
+**Segment record layout — recorded divergence (P1b).** The segment's mail records carry the §2 envelope *fields* in a segment-local 48-byte packed form (context 24 B @0, publish stamp i64 @24, origin stamp i64 @32, hop count u32 @40, flags u32 @44) followed by a u64 transport ordinal and the payload — not the §2 64-byte frame (no version byte / reserved regions inside each record; the header carries the envelope version once per segment). Both P1b participants are this library, and the header's version fields gate skew. Aligning per-record bytes to the §2 frame (or publishing this record layout as normative) is REQUIRED before a foreign participant (M12) targets this backend; tracked in Open items.
+
+**Lifecycle.** Segments are **never unlinked by the library** ("last detacher unlinks" is racy, and unlinking would destroy the warm-start value whose survival is the point). They are bounded by the domain's topic set, namespaced by the isolation key, and reclaimed explicitly: the `xmmsg` CLI (R5 follow-up) gets a cleanup verb; until then `rm /dev/shm/xmmsg.<key>.*` is the documented manual path.
+
+**Schema-hash forms (library conformance note).** The C++ library computes the §4 canonical hash for payload types opted in via its `XMMSG_DESCRIBE` field-description macro (validated against the §5 vectors in-tree). Types that do not opt in fall back to an interim hash over the implementation's mangled type name + size + alignment, prefixed `xmmsg-interim-schema:` so the two forms can never collide. **Stated divergence:** the interim form is not computable by a foreign language and does not catch a same-name/same-size field reorder (M11-A2); payloads crossing a process boundary SHOULD be `XMMSG_DESCRIBE`d.
 
 ## 7. Standard metric schema (R11)
 
@@ -329,7 +362,7 @@ Histogram bucket boundaries are chosen by the telemetry binding, not this spec; 
 
 ## 8. Introspection segment
 
-Placeholder — the byte layout is designed and specified at **P1b** (**TBD**), alongside the POSIX-shm backend, with which it shares its substrate. What is already normative:
+Placeholder — the byte layout is specified in the **P1b introspection follow-up** (**TBD**). The substrate landed with the POSIX-shm backend (§6.4): the per-topic segment header already carries the identity, liveness, and counter surface (single-writer atomic slots, refuse-unknown layout versioning) that an external observer needs, and was designed to be extended by this work. What is already normative:
 
 - The segment is **named and versioned**: its name is derived from the domain isolation key (§6.2), and its first bytes carry a layout version that readers MUST check before interpreting anything else, with the same refuse-unknown rule as the envelope version byte.
 - It is readable by **any** process with no cooperation from the observed application (R5, M10-A1) — attaching and reading MUST be invisible to the observed processes' latency profile (M10-A4).
@@ -343,9 +376,11 @@ Placeholder — the byte layout is designed and specified at **P1b** (**TBD**), 
 | Item | Section | Resolves |
 |---|---|---|
 | Network serialization format (inter-host payload encoding) | §1 | P2 |
-| ClockDomain declaration encoding | §2, §8 | P1b |
-| Maximum topic length | §6.1 | P1 |
-| Domain isolation key derivation algorithm | §6.2 | P1 |
-| iceoryx2 / POSIX-shm QoS mapping columns + resource naming | §6.3 | P1 |
+| ClockDomain declaration encoding | §2, §8 | P1b introspection follow-up (the per-topic segment landed first; ClockDomain rides in the introspection home segment) |
+| Maximum topic length | §6.1 | P1 (POSIX shm bounds the full object name at 240 bytes with a hashed fallback, §6.4) |
+| ~~Domain isolation key derivation algorithm~~ | §6.2 | **resolved (P1b)** |
+| iceoryx2 QoS mapping column + resource naming | §6.3 | P1 |
+| ~~POSIX-shm QoS mapping column + resource naming~~ | §6.3, §6.4 | **resolved (P1b)** |
+| POSIX-shm per-record §2 frame alignment (segment-local record layout is a recorded divergence) | §6.4 | before M12 targets this backend |
 | Zenoh QoS mapping column + key-expression mapping | §6.3 | P2 |
-| Introspection segment byte layout | §8 | P1b |
+| Introspection segment byte layout | §8 | P1b introspection follow-up (shares the §6.4 substrate) |

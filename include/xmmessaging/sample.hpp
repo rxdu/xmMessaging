@@ -20,6 +20,11 @@
 namespace xmotion {
 namespace messaging {
 
+namespace detail {
+template <typename T>
+class ShmSubImpl;  // P1b: the POSIX-shm take machinery mints Samples too
+}  // namespace detail
+
 // D2: tri-state freshness, judged by the library against the deadline
 // declared at wiring time (one declaration, two surfaces — D3).
 enum class Freshness : std::uint8_t {
@@ -91,6 +96,8 @@ class Sample {
  private:
   template <typename>
   friend class Subscriber;  // samples are minted by take verbs only
+  template <typename>
+  friend class detail::ShmSubImpl;  // P1b: the shm take verbs (same rule)
 
   T value_{};
   ::xmotion::telemetry::Context context_{};

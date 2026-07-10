@@ -29,7 +29,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [~] `messaging.*` self-instrumentation — D9 introspect counters always-on; R11 §7 instruments emitted via the xmBase telemetry API (counters, take_age histogram, gauges); hop_latency histogram + label plumbing + M13-A4 capture verification remain (P0b part 2)
 - [x] M9 in-process benchmark layer (`bench/`: micro/path/system/contended layers, hand-rolled harness per family precedent; `scripts/bench.sh` one-command JSON report with hardware context; M9-A3 alloc gate; report-only comparison vs `bench/reference.json` — M9-A5 values TO BE PINNED by CI; 1 MiB payload deferred to P1 pool sizing)
 - [~] M1, M2, M3, M5, M6(in-proc), M7(in-proc), M13(in-proc), M14(in-proc) + M9(in-proc) — **v0.1 gate** — M1/M2/M3/M14 behavioral tests pass (plain + TSan, `test/behavioral/`); M5 (Server/Client verbs), M6/M7/M13 tests are P0b part 2
-- [ ] R6 schema hash: replace the interim typeid-based description (`detail/schema_hash.hpp`) with the wire-contract §4.2 canonical form + V1–V6 vectors before any hash crosses a process boundary (P1)
+- [x] R6 schema hash: §4.2 canonical form available via the `XMMSG_DESCRIBE` opt-in (V1–V6 vectors verified, `test/behavioral/wire_schema_test.cpp`; landed at P1b with the first cross-process hash); the interim typeid form remains the fallback for undescribed types — divergence documented in wire-contract §6.4
 - [~] aarch64 leg of the behavioral suite (R1: seqlock memory ordering must be validated on the weaker memory model in CI) — `ubuntu-24.04-arm` job added to `.github/workflows/ci.yml`; proven when the first CI run goes green
 
 ## P1 — iceoryx2 backend (inter-process)
@@ -45,11 +45,16 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P1b — POSIX shm fallback backend (dependency-free inter-process)
 
-- [ ] memfd segment layout + liveness (kernel reclaim, daemonless); writer-progress-only seqlock for latest-only
-- [ ] initial support matrix entry: latest-only + best-effort queue; reliable + req/resp declared divergences until implemented
-- [ ] M1/M2/M3/M6 cross-process legs runnable without iceoryx2; M4 crash cases against this backend too
-- [ ] share the shm substrate with the R5 introspection segment
-- [ ] may swap order with P1 if the iceoryx2 pin stalls — this backend has no external dependency to wait on
+- [x] segment layout + liveness (`detail/shm_segment.hpp`): `shm_open` named segments — memfd REJECTED (anonymous fds cannot rendezvous by name; decision recorded in wire-contract §6.4 + design.md); pid liveness slots with ESRCH reclaim at wiring paths; ordinals live in the segment and survive publisher crashes; never-unlink lifecycle (CLI cleanup verb deferred to the introspection follow-up)
+- [x] writer-progress-only seqlock + SPSC ring reused via `ShmRegionPlacement` — the placement/waiter parameterization bet held: zero algorithm changes (crash-safety additions only: `LatestSlot::LoadBounded` retry budget + `RepairAfterWriterCrash`; `FutexWaiter` gained the shared-word non-PRIVATE form)
+- [x] support matrix queryable via `Supports()`, asserted by M6-A6: latest-only, best-effort queue (depth ≤ 16), warm start, deadline = yes; reliable queue, zero-copy loan, req/resp, shared ownership = declared divergences refused at wiring (wire-contract §6.3/§6.4)
+- [x] M1/M2/M3/M6 cross-process legs runnable without iceoryx2 (fork+exec `shm_test_helper`) + M4 crash cases (SIGKILL mid-stream: no torn/blocked reads, staleness rises; restart re-advertises + rejoins; MatchedCount observes death/rejoin; ordinal continuity across restart) — plain + TSan + ASan suites green (TSan cross-process blindness documented in `shm_test_support.hpp`)
+- [x] R6 canonical schema hash for cross-process matching: `XMMSG_DESCRIBE` opt-in generates the wire-contract §4.2 description at wiring time, §5 vectors V1–V6 verified (`wire_schema_test`); undescribed types keep the interim typeid hash — documented divergence (§6.4): not foreign-computable, misses the M11-A2 reorder
+- [ ] share the shm substrate with the R5 introspection segment (the per-topic header is designed to extend; introspection segment layout + ClockDomain encoding + `xmmsg` CLI = the P1b introspection follow-up)
+- [ ] align the segment's per-record bytes with the §2 64-byte envelope frame before M12 targets this backend (recorded divergence, wire-contract §6.4)
+- [ ] reliable queue over shm (cross-ring all-or-nothing pre-check) — implement or declare permanent at P1
+- [ ] distinct wiring status for "contract unsupported on this reach" vs "backend not built" (both read kUnsupportedReach today) — P1 API decision
+- [x] may swap order with P1 if the iceoryx2 pin stalls — it did: P1b landed first (no external dependency to wait on)
 
 ## P2 — Zenoh backend (inter-host)
 

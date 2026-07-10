@@ -27,8 +27,13 @@
 
 #include <gtest/gtest.h>
 
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+#include <unistd.h>  // getpid — per-run shm fixture isolation (D17)
+#endif
+
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <thread>
 
 #include "xmmessaging/messaging.hpp"
@@ -73,6 +78,47 @@ constexpr msg::Contract kAllContracts[8] = {
     msg::Contract::kLateJoinWarmStart, msg::Contract::kRequestResponse,
     msg::Contract::kDeadline,          msg::Contract::kSharedOwnership,
 };
+
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+// P1b: the POSIX-shm reach joins the fixture — a new ReachCase and nothing
+// else (M6-A1: the TEST_P bodies below are untouched). Both endpoints live
+// in this process, attached through the shared segment; the fork-based
+// cross-process legs are m1/m2/m3/m4's job.
+std::string PosixShmFixtureName() {
+  // Per-run domain name: segments never collide across runs (D17).
+  static const std::string kName =
+      "m6fix_" + std::to_string(static_cast<unsigned long>(::getpid()));
+  return kName;
+}
+
+msg::Domain MakePosixShm() {
+  return msg::Domain::PosixShm({.name = PosixShmFixtureName()});
+}
+
+// The honestly-partial P1b support matrix (design.md; posix_shm.hpp):
+// latest-only, bounded queue, warm start, deadline — yes; reliable queue,
+// zero-copy loan, RPC, shared ownership — declared divergences.
+constexpr ReachCase kPosixShmCase{
+    "PosixShm",
+    &MakePosixShm,
+    msg::AgeClass::kMeasured,  // same host, one CLOCK_MONOTONIC (R8)
+    {true, true, false, false, true, false, true, false},
+};
+
+// The library's documented policy is never-unlink (shm_segment.hpp); the
+// fixture cleans up its segments when the test program ends.
+class M6ShmCleanup : public ::testing::Environment {
+ public:
+  void TearDown() override {
+    const std::string key =
+        msg::detail::DeriveIsolationKey(PosixShmFixtureName());
+    msg::detail::UnlinkSegment(msg::detail::ShmSegmentName(key, "m6.plan.head"));
+    msg::detail::UnlinkSegment(msg::detail::ShmSegmentName(key, "m6.age.class"));
+  }
+};
+const auto* const kM6ShmCleanup =
+    ::testing::AddGlobalTestEnvironment(new M6ShmCleanup());
+#endif  // XMMESSAGING_HAS_POSIX_SHM
 
 class M6ReachTransparency : public ::testing::TestWithParam<ReachCase> {};
 
@@ -154,10 +200,18 @@ TEST_P(M6ReachTransparency, SupportMatrixAndAgeClass) {
   EXPECT_FALSE(domain.reach_name().empty());
 }
 
-// P1/P1b/P2: append the new reach's ReachCase here — the TEST_P bodies above
-// must not change (M6-A1).
+// P1/P2: append the new reach's ReachCase here — the TEST_P bodies above
+// must not change (M6-A1). P1b (PosixShm) appended without touching them.
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+INSTANTIATE_TEST_SUITE_P(Reaches, M6ReachTransparency,
+                         ::testing::Values(kInProcessCase, kPosixShmCase),
+                         [](const ::testing::TestParamInfo<ReachCase>& info) {
+                           return std::string(info.param.name);
+                         });
+#else
 INSTANTIATE_TEST_SUITE_P(Reaches, M6ReachTransparency,
                          ::testing::Values(kInProcessCase),
                          [](const ::testing::TestParamInfo<ReachCase>& info) {
                            return std::string(info.param.name);
                          });
+#endif

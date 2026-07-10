@@ -44,14 +44,38 @@ inline void* CountingAlloc(std::size_t size) {
   throw std::bad_alloc();
 }
 
+inline void* CountingAllocNoThrow(std::size_t size) noexcept {
+  if (g_alloc_counting) {
+    ++g_alloc_count;
+  }
+  return std::malloc(size != 0 ? size : 1);
+}
+
 }  // namespace xmmsg_test
 
-// Replaceable global allocation functions.
+// Replaceable global allocation functions. The nothrow forms are replaced
+// too (P1b ASan fix): leaving them to the runtime pairs the sanitizer's
+// operator-new allocation (libstdc++'s get_temporary_buffer uses nothrow
+// new) with THIS free-based operator delete — a false alloc-dealloc
+// mismatch under ASan. Replacing every form keeps all pairs
+// malloc/free-consistent for the interceptors.
 void* operator new(std::size_t size) { return xmmsg_test::CountingAlloc(size); }
 void* operator new[](std::size_t size) {
   return xmmsg_test::CountingAlloc(size);
+}
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+  return xmmsg_test::CountingAllocNoThrow(size);
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+  return xmmsg_test::CountingAllocNoThrow(size);
 }
 void operator delete(void* ptr) noexcept { std::free(ptr); }
 void operator delete[](void* ptr) noexcept { std::free(ptr); }
 void operator delete(void* ptr, std::size_t) noexcept { std::free(ptr); }
 void operator delete[](void* ptr, std::size_t) noexcept { std::free(ptr); }
+void operator delete(void* ptr, const std::nothrow_t&) noexcept {
+  std::free(ptr);
+}
+void operator delete[](void* ptr, const std::nothrow_t&) noexcept {
+  std::free(ptr);
+}

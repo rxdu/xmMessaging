@@ -180,3 +180,70 @@ TEST(M3Behavioral, A4_CountersVisible) {
   EXPECT_EQ(msg::introspect::TakeCount(sub_b), taken_b);
   EXPECT_EQ(taken_b + msg::introspect::DropCount(sub_b), kFlood);
 }
+
+// ============================================================================
+// P1b: M3's best-effort accounting across a REAL process boundary (POSIX-shm
+// reach): the flooding publisher counts drops into the subscriber's SHARED
+// slot counter, and delivered + counted-drops == published, exactly (M3-A2)
+// — reconciled from the subscriber process with zero cooperation from the
+// (already exited) publisher. Reliable back-pressure (M3-A1) is a declared
+// divergence on this reach: Supports(kReliableQueue) == false and the
+// reliable Advertise is refused at wiring — asserted here (M6-A6 pattern).
+// ============================================================================
+#if defined(XMMESSAGING_HAS_POSIX_SHM)
+
+#include "shm_test_support.hpp"
+
+TEST(M3Behavioral, ShmCrossProcess_BestEffortConservation) {
+  const std::string domain_name = shmtest::UniqueDomainName("m3shm");
+  shmtest::SegmentJanitor janitor(domain_name, {"m3.flood.best_effort"});
+
+  auto domain = msg::Domain::PosixShm({.name = domain_name});
+  auto sub = domain.Subscribe<ShmTestPlan>(
+      "m3.flood.best_effort", {.history = msg::History::Queue(8)});
+  ASSERT_EQ(sub.status(), msg::SubscribeStatus::kOk);
+
+  // Stalled consumer: the parent takes NOTHING while the child floods.
+  constexpr std::uint64_t kFlood = 1000;
+  shmtest::ChildGuard flooder(shmtest::SpawnHelper(
+      {"flood_queue", domain_name, "m3.flood.best_effort",
+       std::to_string(kFlood)}));
+  ASSERT_GT(flooder.pid(), 0);
+  ASSERT_EQ(flooder.Reap(), 0) << "flood child failed";
+
+  // Drain after the fact: the ring holds exactly its depth; everything else
+  // was dropped-and-counted by the publisher into the shared slot counter.
+  std::uint64_t taken = 0;
+  bool corrupt = false;
+  for (;;) {
+    auto sample = sub.TryTake();
+    if (sample.freshness() == msg::Freshness::kNone) {
+      break;
+    }
+    if (!ShmPlanConsistent(*sample)) {
+      corrupt = true;
+    }
+    ++taken;
+  }
+  EXPECT_FALSE(corrupt);
+  EXPECT_EQ(taken, 8u) << "an untouched queue<8> holds exactly its depth";
+  // M3-A2, cross-process and exact: delivered + counted-drops == published.
+  EXPECT_EQ(taken + msg::introspect::DropCount(sub), kFlood);
+  EXPECT_EQ(msg::introspect::TakeCount(sub), taken);
+}
+
+TEST(M3Behavioral, ShmReliableQueueIsADeclaredDivergence) {
+  const std::string domain_name = shmtest::UniqueDomainName("m3rel");
+  shmtest::SegmentJanitor janitor(domain_name, {"m3.flood.reliable"});
+
+  auto domain = msg::Domain::PosixShm({.name = domain_name});
+  // M6-A6: the divergence is wiring-time knowledge...
+  EXPECT_FALSE(domain.Supports(msg::Contract::kReliableQueue));
+  // ...and the wiring site agrees with the matrix: refused, never emulated.
+  auto pub = domain.Advertise<ShmTestPlan>(
+      "m3.flood.reliable", {.history = msg::History::Queue(8),
+                            .reliability = msg::Reliability::kReliable});
+  EXPECT_EQ(pub.status(), msg::AdvertiseStatus::kUnsupportedReach);
+}
+
+#endif  // XMMESSAGING_HAS_POSIX_SHM

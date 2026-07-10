@@ -70,11 +70,28 @@ namespace detail {
 // immediately (value mismatch), so the pred-recheck can never be lost.
 class FutexWaiter {
  public:
+  // Process-private eventcount: the epoch word is a member and futex ops
+  // carry FUTEX_PRIVATE_FLAG (cheaper: no shared-mapping key lookup).
+  FutexWaiter() noexcept : word_(&internal_), shared_(false) {}
+
+  // P1b shm form: the eventcount over a 32-bit word living in a SHARED
+  // mapping (the segment header's futex word, shm_segment.hpp). Futex ops
+  // drop FUTEX_PRIVATE_FLAG so waiters/wakers in other processes attached
+  // to the same segment participate — this is the "designed to be
+  // shm-capable" claim made good: same protocol, same code, only the word's
+  // home and the futex flags differ. The word's lifetime is the mapping's;
+  // this object is a per-process view.
+  explicit FutexWaiter(std::atomic<std::uint32_t>* shared_word) noexcept
+      : word_(shared_word), shared_(true) {}
+
+  FutexWaiter(const FutexWaiter&) = delete;
+  FutexWaiter& operator=(const FutexWaiter&) = delete;
+
   // Wake every parked thread. Called from transition sites (a request
   // becoming pending, a reply landing, a peer detaching) — never from the
   // pub/sub hot path.
   void NotifyAll() noexcept {
-    epoch_.fetch_add(1, std::memory_order_release);
+    word_->fetch_add(1, std::memory_order_release);
     Wake();
   }
 
@@ -84,7 +101,7 @@ class FutexWaiter {
   template <typename Predicate>
   bool WaitUntil(::xmotion::Timestamp deadline_at, Predicate predicate) {
     for (;;) {
-      const std::uint32_t gen = epoch_.load(std::memory_order_acquire);
+      const std::uint32_t gen = word_->load(std::memory_order_acquire);
       if (predicate()) {
         return true;
       }
@@ -108,8 +125,8 @@ class FutexWaiter {
  private:
 #if defined(__linux__)
   void Wake() noexcept {
-    ::syscall(SYS_futex, &epoch_, FUTEX_WAKE_PRIVATE, INT32_MAX, nullptr,
-              nullptr, 0);
+    ::syscall(SYS_futex, word_, shared_ ? FUTEX_WAKE : FUTEX_WAKE_PRIVATE,
+              INT32_MAX, nullptr, nullptr, 0);
   }
 
   void WaitOn(std::uint32_t expected, ::xmotion::Duration remaining) noexcept {
@@ -119,7 +136,8 @@ class FutexWaiter {
     // FUTEX_WAIT relative timeouts are judged on CLOCK_MONOTONIC (R8).
     timespec ts{static_cast<time_t>(ns / 1000000000),
                 static_cast<long>(ns % 1000000000)};
-    ::syscall(SYS_futex, &epoch_, FUTEX_WAIT_PRIVATE, expected, &ts, nullptr,
+    ::syscall(SYS_futex, word_, shared_ ? FUTEX_WAIT : FUTEX_WAIT_PRIVATE,
+              expected, &ts, nullptr,
               0);  // EAGAIN/EINTR/ETIMEDOUT all re-enter the caller's loop
   }
 #else
@@ -138,11 +156,18 @@ class FutexWaiter {
   }
 #endif
 
-  // The futex word. 32-bit by kernel contract; the atomic is the ONLY
-  // synchronization TSan needs to see (the syscall carries none).
-  std::atomic<std::uint32_t> epoch_{0};
+  // The futex word: the internal member by default, a word inside a shared
+  // mapping for the P1b shm form. 32-bit by kernel contract; the atomic is
+  // the ONLY synchronization TSan needs to see (the syscall carries none —
+  // note TSan cannot see the CROSS-PROCESS half of a shared-word protocol;
+  // the in-process protocol is what it verifies).
+  std::atomic<std::uint32_t>* word_;
+  std::atomic<std::uint32_t> internal_{0};
+  bool shared_;
   static_assert(sizeof(std::atomic<std::uint32_t>) == 4,
                 "futex word must be exactly 32 bits");
+  static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+                "futex word must be address-free for the shm form");
 };
 
 // Condition-variable waiter (portable reference; NOT used for timed parks on
