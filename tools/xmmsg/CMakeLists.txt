@@ -6,3 +6,7 @@
 add_executable(xmmsg xmmsg.cpp)
 target_link_libraries(xmmsg PRIVATE xmotion::xmmessaging)
 target_compile_options(xmmsg PRIVATE ${XMMESSAGING_WARNINGS})
+
+# Part of the shipped payload (family pattern: the telemetry CLIs install
+# to bin/ next to the library).
+install(TARGETS xmmsg RUNTIME DESTINATION bin)

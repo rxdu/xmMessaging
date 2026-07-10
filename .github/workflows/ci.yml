@@ -66,6 +66,25 @@ jobs:
       - name: Run test suites
         run: cd build && ctest --output-on-failure
 
+  # R1: "time-to-first-message under 10 minutes, quickstart tested in CI".
+  # This job executes scripts/quickstart.sh — the SAME script the README
+  # documents step by step — from a clean checkout on both supported LTS
+  # baselines, so the documented commands and the verified commands cannot
+  # drift. (Deliberately near-duplicates the build job's configure+build:
+  # the claim under test is the user's literal first-run experience.)
+  quickstart:
+    name: quickstart (${{ matrix.os }}, R1)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Run the README quickstart, literally
+        run: ./scripts/quickstart.sh
+
   # M1-A2 and friends: the behavioral suite must be TSan-clean — the seqlock
   # and SPSC rings are only trustworthy race-instrumented.
   tsan:

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xmMessaging VERSION 0.0.1 LANGUAGES CXX)
+project(xmMessaging VERSION 0.1.0 LANGUAGES CXX)
 
 # P0b (part 1): the in-process reach is real — xmmessaging is a compiled
 # STATIC library (seqlock LatestSlot, SPSC BoundedQueue, typed Domain
@@ -65,7 +65,7 @@ endif ()
 ## In-tree target > installed > bundled submodule — same resolution order as
 ## xmTelemetry/xmDriver.
 if (NOT TARGET xmotion::xmBase)
-  find_package(xmBase 0.3.0 QUIET)
+  find_package(xmBase 0.4.0 QUIET)
   if (NOT xmBase_FOUND)
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xmBase/CMakeLists.txt)
       message(STATUS "xmMessaging: using bundled third_party/xmBase")
@@ -196,4 +196,62 @@ if (XMMESSAGING_BUILD_BENCH)
   add_subdirectory(bench)
 endif ()
 
-message(STATUS "xmMessaging: P0b — in-process reach + behavioral suite (BUILD_TESTING); see docs/scenarios.md")
+## Installation setup (same conventions as xmBase/xmTelemetry: lib/, bin/,
+## include/, lib/cmake/<name>). Works standalone with the test/scenario
+## options OFF: a plain `cmake -B build && cmake --install build` installs
+## the static library, the public headers (incl. detail/ — the typed verbs
+## are header templates), and the xmmsg CLI (tools/xmmsg/CMakeLists.txt).
+## Test binaries, scenarios, bench, and the bundled third_party/xmBase
+## (EXCLUDE_FROM_ALL — it ships separately as libxmotion-base) are never
+## installed.
+install(TARGETS xmmessaging EXPORT xmMessagingTargets
+    LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin
+    INCLUDES DESTINATION include)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# export target configuration
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    xmMessagingConfigVersion.cmake
+    VERSION "${${PROJECT_NAME}_VERSION_MAJOR}.${${PROJECT_NAME}_VERSION_MINOR}.${${PROJECT_NAME}_VERSION_PATCH}"
+    COMPATIBILITY SameMajorVersion)
+
+install(EXPORT xmMessagingTargets
+    FILE xmMessagingTargets.cmake
+    NAMESPACE xmotion::
+    DESTINATION lib/cmake/xmMessaging)
+
+configure_file(cmake/xmMessagingConfig.cmake.in xmMessagingConfig.cmake @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/xmMessagingConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/xmMessagingConfigVersion.cmake"
+    DESTINATION lib/cmake/xmMessaging)
+
+# Apache-2.0: the LICENSE ships as the package copyright doc (family
+# pattern; the /opt/xmotion packaging prefix keeps it out of Debian's
+# /usr/share/doc policy path), with the Apache NOTICE alongside it.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+    DESTINATION share/doc/libxmotion-messaging RENAME copyright)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/NOTICE"
+    DESTINATION share/doc/libxmotion-messaging)
+
+# Packaging support (R1: deb packaging follows the family pattern —
+# xmBase/xmTelemetry conventions: libxmotion-* naming, /opt/xmotion prefix,
+# one package carrying lib + headers + tools).
+set(CPACK_DEBIAN_PACKAGE_NAME "libxmotion-messaging")
+set(CPACK_PACKAGE_VENDOR "Ruixiang Du")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "xmMessaging - the XMotion application messaging layer: typed pub/sub and request/response across reaches, with the xmmsg introspection CLI")
+set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/xmotion")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+# The declared xmBase floor — same pin as find_package/find_dependency.
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libxmotion-base (>= 0.4.0)")
+set(CPACK_GENERATOR "DEB")
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Ruixiang Du (ruixiang.du@gmail.com)")
+set(CPACK_SOURCE_IGNORE_FILES .git dist .*build.* /\\\\.DS_Store)
+include(CPack)
+
+message(STATUS "xmMessaging: v0.1 — in-process + POSIX-shm reaches, behavioral suite (BUILD_TESTING); see docs/scenarios.md")
