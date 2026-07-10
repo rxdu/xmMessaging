@@ -37,6 +37,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] M10 introspection: shared-memory health segment + CLI tool (list/watch topics, rates, drops, staleness)
 - [ ] M11 type-skew refusal (R6): three skew cases + cross-build hash determinism
 - [ ] M12 foreign-language participant (R10): Python via native backend binding + spec only — lands with the first backend whose Python binding is mature (Zenoh likely first)
+- [ ] binding ladder (R10, on consumer demand): Python -> Go (via C ABI/cgo; no RT guarantees at call site) -> Rust (likely spec-only, native crates)
 
 ## P2 — Zenoh backend (inter-host)
 
