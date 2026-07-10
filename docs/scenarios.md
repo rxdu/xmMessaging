@@ -37,6 +37,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 | M9 | Benchmark suite & wrapper-overhead budget | `bench/` | thin wrapper, measured (R3, R4) | all three | P0b (in-proc), grows with backends |
 | M10 | External introspection | `test/scenarios/m10_introspection.cpp` + CLI | outside-the-process diagnostics (R5) | inter-process | P1 |
 | M11 | Rebuild skew: type-identity refusal | `test/scenarios/m11_type_skew.cpp` | schema-hash match gate (R6) | inter-process | P1 |
+| M12 | Foreign-language participant | `test/scenarios/m12_foreign_participant/` | wire contracts, not bindings (R10) | inter-process / inter-host | P1–P2 (first backend with a mature Python binding) |
 
 ---
 
@@ -174,6 +175,19 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A3: the refusal is visible in introspection (M10 tooling): both endpoints listed, marked incompatible, with both schema hashes shown.
 - A4: the control case matches — separately-built identical layouts produce identical hashes (hash is deterministic across builds, not a build fingerprint).
 - A5: the refusal is local — other topics between the same two processes keep flowing.
+
+## M12 — Foreign-language participant
+
+**Purpose.** R10 as a test: a component outside the family, in another language, joins the system using only its backend's native binding plus the published wire-contract spec — zero xmMessaging code on its side.
+
+**Setup.** The C++ M1 pair runs unmodified. A Python process, written against the backend's native Python binding and the wire-contract spec (no generated code from this repo), (a) subscribes to `m1.plan.head` and (b) publishes a valid payload back on a second topic consumed by the C++ side. The spec artifacts under test: envelope layout, schema-hash algorithm, topic/QoS mapping, payload layout rules.
+
+**Acceptance criteria.**
+- A1: the Python subscriber decodes payloads and envelope (stamp + telemetry context) correctly, verified against the C++ side's ground truth — byte-for-byte on the envelope fields.
+- A2: the Python side computes the R6 schema hash **from the spec's conformance vectors alone** and matches the C++-computed hash for the same layout; a deliberately wrong layout is refused at match, proving the gate holds for foreign participants too.
+- A3: the C++ consumer cannot distinguish the Python publisher from a C++ one: same contracts, same staleness surface, same introspection visibility (the Python endpoints appear in M10 tooling).
+- A4: the spec is sufficient — the scenario's Python code imports nothing from this repository, and CI runs it from the spec + backend binding only. Any needed clarification is a spec defect, recorded like an API delta.
+- A5: a payload violating the cross-language layout rules (implicit padding) is rejected at the C++ wiring site at compile time — the rule exists on the family side, not just in prose.
 
 ---
 

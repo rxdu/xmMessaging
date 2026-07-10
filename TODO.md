@@ -15,7 +15,8 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 ## P0a — API headers + in-process reach skeleton
 
 - [ ] `include/xmmessaging/` API tier (Domain, Advertise/Subscribe, QoS vocabulary, statuses)
-- [ ] schema-hash mechanism (R6): compile-time layout hash + endpoint match slot — designed before the API freezes
+- [ ] schema-hash mechanism (R6): compile-time layout hash + endpoint match slot — designed before the API freezes; algorithm defined over wire layout, language-neutral, with conformance vectors (R10)
+- [ ] wire-contract spec skeleton (R10): envelope byte layout, payload layout rules (standard-layout, explicit padding), topic/QoS conventions — versioned doc under docs/
 - [ ] per-reach support matrix representation (R3): queryable at wiring time
 - [ ] xmBase dependency resolution (in-tree > installed > bundled submodule, xmTelemetry pattern)
 - [ ] M8 lib-only link test (zero transport deps by default)
@@ -35,6 +36,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] M9 backend layer: wrapper-overhead A/B vs raw iceoryx2, budget pinned + CI-gated
 - [ ] M10 introspection: shared-memory health segment + CLI tool (list/watch topics, rates, drops, staleness)
 - [ ] M11 type-skew refusal (R6): three skew cases + cross-build hash determinism
+- [ ] M12 foreign-language participant (R10): Python via native backend binding + spec only — lands with the first backend whose Python binding is mature (Zenoh likely first)
 
 ## P2 — Zenoh backend (inter-host)
 

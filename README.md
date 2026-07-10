@@ -22,6 +22,7 @@ Key contracts (see [docs/design.md](docs/design.md)):
 - **Backend seam** — engines behind CMake options, all default-off; the in-process reach never costs a dependency.
 - **Thin by measurement** — wrapper overhead vs the raw engines is benchmarked and CI-gated, with a native escape hatch for anything the portable surface doesn't cover; reference numbers ship with every release.
 - **Introspectable** — transport health (topics, rates, drops, staleness) is readable from outside the process at runtime via a CLI tool, with zero application cooperation.
+- **Multi-language by contract** — every portable contract is specified at the byte level (envelope, schema hash, topic/QoS mapping), so non-C++ components join through their backend's native bindings plus the spec; dedicated bindings only when a consumer demands one.
 
 Per [ADR 0005](https://github.com/rxdu/xmotion/blob/main/docs/adr/0005-application-level-composition.md), algorithm and hardware components never link this library — only applications do.
 
