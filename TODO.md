@@ -14,7 +14,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P0a — API headers + in-process reach skeleton
 
-- [ ] `include/xmmessaging/` API tier (Domain, Advertise/Subscribe, QoS vocabulary, statuses)
+- [ ] `include/xmmessaging/` API tier (Domain, Advertise/Subscribe, QoS vocabulary, statuses) — incl. Domain::PosixShm() factory alongside InProcess/Iceoryx2/Zenoh
 - [ ] schema-hash mechanism (R6): compile-time layout hash + endpoint match slot — designed before the API freezes; algorithm defined over wire layout, language-neutral, with conformance vectors (R10)
 - [ ] wire-contract spec skeleton (R10): envelope byte layout, payload layout rules (standard-layout, explicit padding), topic/QoS conventions — versioned doc under docs/
 - [ ] per-reach support matrix representation (R3): queryable at wiring time
@@ -23,7 +23,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P0b — in-process reach behavioral
 
-- [ ] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter)
+- [ ] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter) — parameterized over placement (heap vs shared mapping) + waiter (condvar vs futex) from day one, so the POSIX shm backend reuses it unchanged
 - [ ] queue<N> + reliability policies
 - [ ] `messaging.*` self-instrumentation
 - [ ] M9 in-process benchmark layer (`bench/`: per-verb micro + hop-path; JSON report, CI artifact)
@@ -38,6 +38,14 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] M11 type-skew refusal (R6): three skew cases + cross-build hash determinism
 - [ ] M12 foreign-language participant (R10): Python via native backend binding + spec only — lands with the first backend whose Python binding is mature (Zenoh likely first)
 - [ ] binding ladder (R10, on consumer demand): Python -> Go (via C ABI/cgo; no RT guarantees at call site) -> Rust (likely spec-only, native crates)
+
+## P1b — POSIX shm fallback backend (dependency-free inter-process)
+
+- [ ] memfd segment layout + liveness (kernel reclaim, daemonless); writer-progress-only seqlock for latest-only
+- [ ] initial support matrix entry: latest-only + best-effort queue; reliable + req/resp declared divergences until implemented
+- [ ] M1/M2/M3/M6 cross-process legs runnable without iceoryx2; M4 crash cases against this backend too
+- [ ] share the shm substrate with the R5 introspection segment
+- [ ] may swap order with P1 if the iceoryx2 pin stalls — this backend has no external dependency to wait on
 
 ## P2 — Zenoh backend (inter-host)
 

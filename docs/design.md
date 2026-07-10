@@ -31,8 +31,8 @@ The central design commitment (decided 2026-07-10, extending the planning–cont
 | Reach | Peer is a… | Engine | Data path |
 |---|---|---|---|
 | **In-process** | thread | built-in (no dependencies) | move/copy through a wait-free slot or queue — no serialization |
-| **Inter-process** | process on the same host | iceoryx2 | true zero-copy shared memory (publisher loans, subscriber reads in place) |
-| **Inter-host** | process on another host | Zenoh | serialized network transport (xmBase serialization) |
+| **Inter-process** | process on the same host | iceoryx2 (default) or the built-in **POSIX shm fallback** | true zero-copy shared memory (publisher loans, subscriber reads in place) |
+| **Inter-host** | process on another host | Zenoh (no fallback — a stated divergence, not a hand-rolled transport) | serialized network transport (xmBase serialization) |
 
 Why one surface: the 2026-07-06 planning–control design showed the coupling pattern (planner produces at ~10 Hz, controller consumes latest at 100 Hz+) is identical whether the two live in one process or two. Making reach a wiring-time property means an application can start single-process (simplest to debug), split when a deployment needs it, and distribute when a host boundary appears — without touching component code or the loop.
 
@@ -93,7 +93,23 @@ In scope for v1 (decided 2026-07-10): typed `Client<Req, Rsp>` / `Server<Req, Rs
 
 ## Backend seam
 
-The ADR 0004 pattern: a thin portable API in this library's headers; engines behind CMake options (`XMMESSAGING_WITH_ICEORYX2`, `XMMESSAGING_WITH_ZENOH`), one option per backend, all default-off. The in-process reach is always present and dependency-free, so linking xmMessaging never forces a transport dependency on an application that composes in one process. DDS remains addable behind the seam if an integration contractually requires it. ROS 2 is a bridge at an application's boundary, never a backend.
+The ADR 0004 pattern: a thin portable API in this library's headers; engines behind CMake options (`XMMESSAGING_WITH_ICEORYX2`, `XMMESSAGING_WITH_ZENOH`, `XMMESSAGING_WITH_POSIX_SHM`), one option per backend. The external-dependency backends default off; the POSIX shm fallback defaults **on**, because the default-off rule exists to prevent dependency creep and this backend has no dependencies to creep. The in-process reach is always present and dependency-free, so linking xmMessaging never forces a transport dependency on an application that composes in one process. DDS remains addable behind the seam if an integration contractually requires it. ROS 2 is a bridge at an application's boundary, never a backend.
+
+### The POSIX shm fallback backend (decided 2026-07-10)
+
+When iceoryx2 is unavailable — unsupported target, no Rust toolchain, minimal images, pre-1.0 pin trouble — the inter-process reach must not disappear. The fallback is a built-in backend using only kernel-native primitives: `memfd`-backed shared mappings with futex wakeups. Three facts make this affordable where it is usually reckless:
+
+1. The portable contracts are few and small — this backend implements *our* four-knob vocabulary, not a middleware. The LatestMailbox maps to a **writer-progress-only seqlock**: readers take no locks (retry on torn reads), so a dying reader holds nothing and a dying writer leaves a skippable sequence — the M4 crash story without robust-lock recovery on the data path. Futexes are used for optional wakeups only.
+2. The in-process reach already implements the same slot/ring algorithms. They are written **once**, parameterized over placement (heap vs shared mapping) and waiter (condvar vs futex) — the fallback is not a second implementation to drift.
+3. The R5 introspection segment is shm machinery regardless; transport and introspection share the substrate. Lifecycle is daemonless by construction: the kernel reclaims mappings when the last mapper exits.
+
+It ships **honestly partial** via the R3 support matrix: latest-only and best-effort queues first; `reliable` queues and request/response arrive later or remain declared divergences (`Supports()` says no; applications decide). It also repositions iceoryx2 as the performance-optimized choice rather than a single point of failure for the reach — and both backends are verified by the same M6 assertion code.
+
+There is deliberately **no inter-host fallback**: reliable network messaging with QoS is the thing ADR 0006 evaluated seven candidates to avoid owning. Where Zenoh is unavailable, the inter-host reach is unsupported (a stated divergence) or the application bridges at its boundary.
+
+### Why the in-process reach survives the fallback
+
+A dependency-free shm backend raises the fair question of whether thread↔thread still needs its own reach. It does, for four reasons: (1) **type richness** — in-process accepts any movable C++ type (vectors, smart pointers, non-POD state); shm confines payloads to standard-layout, explicitly-padded, fixed-size types, a real tax on single-process applications, which are the common starting shape; (2) **it is the reference semantics** — the contracts are defined by in-process behavior and P0b proves them under ThreadSanitizer, which sees process-local memory but not cross-process shm; (3) **zero OS footprint** — no `/dev/shm` objects, no naming, no cleanup, which keeps component tests trivial in any CI sandbox; (4) **cost** — with the placement/waiter parameterization above, keeping it is nearly free: same algorithms, heap placement, richer type bound.
 
 ## Multi-language interoperability (R10)
 
