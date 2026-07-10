@@ -32,6 +32,8 @@ class EndpointImpl;
 struct EndpointAccess;  // P0b: introspect/test seam over the impl pointer
 template <typename T>
 class LoanPool;  // P0b: publisher-side loan cell pool (detail/in_process.hpp)
+template <typename Req, typename Rsp>
+class RpcTopic;  // P0b part 2: RPC slot machinery (detail/in_process.hpp)
 }  // namespace detail
 
 // Common endpoint surface: the D16 readiness knobs and the R3 escape hatch.
@@ -222,6 +224,8 @@ class Request {
  private:
   template <typename, typename>
   friend class Server;  // requests are minted by TakeRequest only
+  template <typename, typename>
+  friend class detail::RpcTopic;  // P0b: the machinery behind TakeRequest
 
   Req value_{};
   ::xmotion::telemetry::Context context_{};
@@ -287,6 +291,8 @@ class Result {
  private:
   template <typename, typename>
   friend class Client;  // results are minted by Call only
+  template <typename, typename>
+  friend class detail::RpcTopic;  // P0b: the machinery behind Call
 
   Rsp value_{};
   CallStatus status_ = CallStatus::kNoServer;

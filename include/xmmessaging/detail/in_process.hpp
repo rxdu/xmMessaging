@@ -50,11 +50,16 @@
  *
  * Hot-path discipline (R7): after wiring, Publish/TakeLatest/TryTake
  * allocate nothing and take no locks on the exclusive-ownership path.
- * Wiring-time paths (Advertise/Subscribe/destruction/WaitUntilMatched)
- * lock DomainState::mutex_. Declared-shared publishers serialize on the
- * topic writer mutex (see TopicBase::shared_write_mutex_).
+ * Wiring-time paths (Advertise/Subscribe/Serve/Client/destruction/
+ * WaitUntilMatched) lock DomainState::mutex_. Declared-shared publishers
+ * serialize on the topic writer mutex (see TopicBase::shared_write_mutex_).
+ * RPC verbs (Call/TakeRequest/Reply) are lock-free and allocation-free over
+ * preallocated call slots; Call and WaitForWorkOrShutdown may PARK the
+ * calling thread, bounded by the caller's own deadline/max_park — that is
+ * their documented contract (D10/D11), not a hot-path exception.
  *
- * Threads: none. The library never spawns anything (R3).
+ * Threads: none. The library never spawns anything (R3); the server
+ * executes only inside the application's TakeRequest/Reply calls.
  *
  * detail/: not part of the portable API surface.
  *
@@ -163,6 +168,16 @@ class LoanPool {
 // always-on counters and the R11 standard-schema instruments. Instrument
 // name strings are members because the telemetry SDK interns names by
 // pointer — they must outlive every hot-path handle use.
+//
+// STATED DIVERGENCE from wire-contract §7 (labels): the xmBase telemetry
+// metric API is name-only (GetCounter/GetGauge/GetHistogram take no label
+// set; Binding::set_resource is process-level, not per-instrument). The
+// `topic` label is therefore carried in the instrument NAME (which §7 makes
+// normative anyway); the remaining common labels (`endpoint_id`, `pid`,
+// `reach`) and the per-hop `pub_endpoint_id`/`sub_endpoint_id` labels are
+// NOT representable until xmBase grows per-instrument labels. Recorded here
+// rather than half-emulated by mangling names beyond the normative form.
+// TODO(P1): revisit when the xmBase metric API grows label support.
 // ---------------------------------------------------------------------------
 template <typename T>
 struct SubCore {
@@ -175,12 +190,14 @@ struct SubCore {
         n_deadline_miss("messaging.sub." + topic + ".deadline_miss_count"),
         n_take_age("messaging.sub." + topic + ".take_age_us"),
         n_queue_depth("messaging.sub." + topic + ".queue_depth"),
+        n_hop_latency("messaging.hop." + topic + ".hop_latency_us"),
         t_take(::xmotion::telemetry::GetCounter(n_take)),
         t_drop(::xmotion::telemetry::GetCounter(n_drop)),
         t_overwrite(::xmotion::telemetry::GetCounter(n_overwrite)),
         t_deadline_miss(::xmotion::telemetry::GetCounter(n_deadline_miss)),
         t_take_age(::xmotion::telemetry::GetHistogram(n_take_age)),
-        t_queue_depth(::xmotion::telemetry::GetGauge(n_queue_depth)) {
+        t_queue_depth(::xmotion::telemetry::GetGauge(n_queue_depth)),
+        t_hop_latency(::xmotion::telemetry::GetHistogram(n_hop_latency)) {
     if (history.kind() == History::Kind::kLatestOnly) {
       latest = std::make_unique<LatestSlotFor<T>>();
     } else {
@@ -191,12 +208,15 @@ struct SubCore {
   const History history;
   const std::optional<Duration> deadline;
 
-  // R11 §7 instrument names (stable storage) + handles.
+  // R11 §7 instrument names (stable storage) + handles. hop_latency_us is
+  // emitted at take, per §7's per-hop rule: only where publisher and
+  // subscriber share a clock — which the in-process reach does always.
   const std::string n_take, n_drop, n_overwrite, n_deadline_miss, n_take_age,
-      n_queue_depth;
+      n_queue_depth, n_hop_latency;
   ::xmotion::telemetry::Counter t_take, t_drop, t_overwrite, t_deadline_miss;
   ::xmotion::telemetry::Histogram t_take_age;
   ::xmotion::telemetry::Gauge t_queue_depth;
+  ::xmotion::telemetry::Histogram t_hop_latency;
 
   // Exactly one of these is engaged, by declared History (D7).
   std::unique_ptr<LatestSlotFor<T>> latest;
@@ -450,6 +470,324 @@ class Topic final : public TopicBase {
 };
 
 // ---------------------------------------------------------------------------
+// RPC machinery (M5, D10/D11). One RpcTopic per topic string, carrying a
+// FIXED array of preallocated call slots — Call/TakeRequest/Reply never
+// allocate (stricter than the P0b allowance of request-granularity
+// allocation). In-flight bound: kMaxInFlight = 8 concurrent calls per topic
+// (each blocking Call occupies one slot for its own duration, so 8 covers 8
+// concurrent caller threads; a ninth parks until a slot frees or its
+// deadline expires). A Qos-declared max-in-flight knob is deliberately NOT
+// added at P0b — Serve/Client take no Qos parameter in the frozen P0a API,
+// and growing the API is a P1 decision. Recorded as an open item.
+//
+// Slot lifecycle (single atomic state word per slot; the state transitions
+// are the only cross-thread synchronization — TSan-exact):
+//
+//   kFree --CAS(client)--> kClaimed : claimant owns the slot exclusively;
+//     writes request payload, envelope (caller context, D13; stamp), and
+//     the correlation token, then
+//   kClaimed --store(release)------> kPending : visible to the server
+//     (server_waiter_ notified — D10 bounded park).
+//   kPending --CAS(server)---------> kTaken   : TakeRequest owns it; the
+//     Request<Req> carries value + context + stamp + correlation.
+//   kTaken --Reply: write response, CAS(release)--> kReplied : the parked
+//     caller (client_waiter_) consumes the response and frees the slot.
+//   kTaken --CAS(client at deadline)--> kAbandoned : caller gave up while
+//     the server held the request; the server's eventual Reply observes it,
+//     frees the slot, and returns ReplyStatus::kExpired (D20 — observable,
+//     never an error path). The response value is discarded with the slot.
+//   kPending --CAS(client at deadline)--> kFree : the server never saw the
+//     request; revoked cleanly.
+//
+// Late replies can never surface on a later call (M5-A2): the correlation
+// token encodes (monotonic per-topic counter << kIndexBits | slot index);
+// Reply writes a response only through a CAS that requires the slot still
+// in kTaken AND the token to match — a slot recycled for a newer call has
+// a newer token, so the stale Reply is refused with kExpired and touches
+// nothing the new call can observe.
+//
+// Contract: every taken request is Reply'd exactly once — an abandoned
+// taken slot is reclaimed BY that Reply; a server that takes and never
+// replies leaks the slot until it does (in-process, the server loop is
+// application-owned code; a sweep would race legitimately-outstanding
+// requests held across TakeRequest calls).
+// ---------------------------------------------------------------------------
+
+enum class CallSlotState : std::uint32_t {
+  kFree = 0,
+  kClaimed = 1,
+  kPending = 2,
+  kTaken = 3,
+  kReplied = 4,
+  kAbandoned = 5,
+};
+
+template <typename Req, typename Rsp>
+struct CallSlot {
+  std::atomic<std::uint32_t> state{
+      static_cast<std::uint32_t>(CallSlotState::kFree)};
+  // Written by the claimant while kClaimed; stable (readable) in every
+  // state from kPending until the slot returns to kFree.
+  std::uint64_t correlation = 0;
+  Envelope envelope{};  // caller context (D13) + request stamp
+  Req request{};
+  Rsp response{};
+};
+
+// Type tag for the R6 identity of an RPC topic: a Server<Req,Rsp> and a
+// Client<Req,Rsp> match each other and nothing else (in particular, never a
+// pub/sub topic of the same name).
+template <typename Req, typename Rsp>
+struct RpcTag {};
+
+template <typename Req, typename Rsp>
+class RpcTopic final : public TopicBase {
+ public:
+  static constexpr std::uint32_t kMaxInFlight = 8;  // see the header comment
+  static constexpr std::uint32_t kIndexBits = 4;    // kMaxInFlight <= 16
+  static_assert(kMaxInFlight <= (1u << kIndexBits),
+                "correlation token index field too narrow");
+
+  RpcTopic(std::string name, std::uint64_t schema_hash)
+      : TopicBase(std::move(name), schema_hash, typeid(RpcTag<Req, Rsp>)) {}
+
+  // ---- wiring side (DomainState::mutex_ held by the caller) --------------
+
+  // One server per topic (D18 kOwnershipRefused on a duplicate — the RPC
+  // analogue of exclusive ownership; there is no shared-server mode).
+  AdvertiseStatus AddServer() {
+    if (publisher_count_.load(std::memory_order_relaxed) > 0) {
+      return AdvertiseStatus::kOwnershipRefused;
+    }
+    publisher_count_.fetch_add(1, std::memory_order_relaxed);
+    return AdvertiseStatus::kOk;
+  }
+
+  void RemoveServer() {
+    publisher_count_.fetch_sub(1, std::memory_order_relaxed);
+    // Wake parked callers so their loops observe the peer loss at the next
+    // predicate check (their deadline still bounds the wait regardless).
+    client_waiter_.NotifyAll();
+  }
+
+  void AddClient() { subscriber_count_.fetch_add(1, std::memory_order_relaxed); }
+
+  void RemoveClient() {
+    subscriber_count_.fetch_sub(1, std::memory_order_relaxed);
+    // The D10 "shutdown begins" wake for the common teardown order: a
+    // detaching peer unparks the server loop so application-owned shutdown
+    // flags are observed immediately, not after max_park.
+    server_waiter_.NotifyAll();
+  }
+
+  // ---- call side (D11) ----------------------------------------------------
+
+  Result<Rsp> Call(const Req& request, Duration deadline) {
+    Result<Rsp> result;  // kNoServer until proven otherwise
+    // M5-A3: absent-server fails fast, distinct from timeout. Judged at
+    // call entry; a server appearing mid-call does not rescue this call.
+    if (publisher_count_.load(std::memory_order_acquire) == 0) {
+      return result;
+    }
+    const Timestamp deadline_at = ::xmotion::Now() + deadline;
+
+    // Acquire a preallocated slot; park bounded by the caller's own
+    // deadline if all kMaxInFlight are busy.
+    CallSlot<Req, Rsp>* slot = nullptr;
+    std::uint32_t index = 0;
+    for (;;) {
+      slot = TryClaim(&index);
+      if (slot != nullptr) {
+        break;
+      }
+      const bool claimed = client_waiter_.WaitUntil(
+          deadline_at, [this, &slot, &index] {
+            slot = TryClaim(&index);
+            return slot != nullptr;
+          });
+      if (claimed) {
+        break;
+      }
+      result.status_ = CallStatus::kDeadlineExpired;
+      return result;
+    }
+
+    // Fill while exclusively owned (kClaimed), then publish (release).
+    const std::uint64_t token =
+        ((next_correlation_.fetch_add(1, std::memory_order_relaxed) + 1)
+         << kIndexBits) |
+        index;
+    slot->correlation = token;
+    const auto context_bytes =
+        ::xmotion::telemetry::Inject(::xmotion::telemetry::CurrentContext());
+    std::memcpy(slot->envelope.context, context_bytes.data(),
+                kEnvelopeContextSize);
+    const std::int64_t now_ns = ::xmotion::Now().time_since_epoch().count();
+    slot->envelope.publish_stamp_ns = now_ns;
+    slot->envelope.origin_stamp_ns = now_ns;  // a request is first-hop
+    slot->envelope.hop_count = 0;
+    slot->envelope.flags = 0;
+    slot->request = request;
+    slot->state.store(static_cast<std::uint32_t>(CallSlotState::kPending),
+                      std::memory_order_release);
+    server_waiter_.NotifyAll();  // D10: unpark WaitForWorkOrShutdown
+
+    // Bounded reply wait (D11: the deadline is the contract).
+    const bool replied = client_waiter_.WaitUntil(deadline_at, [slot] {
+      return slot->state.load(std::memory_order_acquire) ==
+             static_cast<std::uint32_t>(CallSlotState::kReplied);
+    });
+    if (replied) {
+      result.value_ = slot->response;
+      result.status_ = CallStatus::kOk;
+      ReleaseSlot(*slot);
+      return result;
+    }
+
+    // Deadline expired. Revoke or abandon; a reply that landed exactly at
+    // the boundary is still consumed (it is available at return time).
+    std::uint32_t expected =
+        static_cast<std::uint32_t>(CallSlotState::kPending);
+    if (slot->state.compare_exchange_strong(
+            expected, static_cast<std::uint32_t>(CallSlotState::kFree),
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+      client_waiter_.NotifyAll();  // a slot freed: wake slot-waiters
+      result.status_ = CallStatus::kDeadlineExpired;
+      return result;
+    }
+    expected = static_cast<std::uint32_t>(CallSlotState::kTaken);
+    if (slot->state.compare_exchange_strong(
+            expected, static_cast<std::uint32_t>(CallSlotState::kAbandoned),
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // The server holds it; its Reply reclaims the slot (kExpired, M5-A2).
+      result.status_ = CallStatus::kDeadlineExpired;
+      return result;
+    }
+    // Neither CAS took: the reply landed in the race window — consume it.
+    result.value_ = slot->response;
+    result.status_ = CallStatus::kOk;
+    ReleaseSlot(*slot);
+    return result;
+  }
+
+  // ---- serve side (D10) ---------------------------------------------------
+
+  Request<Req> TakeRequest() {
+    Request<Req> taken;  // kNone until a pending request is claimed
+    for (auto& slot : slots_) {
+      std::uint32_t expected =
+          static_cast<std::uint32_t>(CallSlotState::kPending);
+      if (slot.state.compare_exchange_strong(
+              expected, static_cast<std::uint32_t>(CallSlotState::kTaken),
+              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        taken.value_ = slot.request;
+        taken.context_ = ::xmotion::telemetry::Extract(slot.envelope.context,
+                                                       kEnvelopeContextSize);
+        taken.stamp_ =
+            Timestamp(Duration(slot.envelope.publish_stamp_ns));
+        taken.correlation_ = slot.correlation;
+        taken.freshness_ = Freshness::kFresh;
+        return taken;
+      }
+    }
+    return taken;
+  }
+
+  ReplyStatus Reply(std::uint64_t correlation, const Rsp& response) {
+    if (correlation == 0) {
+      return ReplyStatus::kExpired;  // kNone request (contract violation
+                                     // asserted by the caller verb)
+    }
+    CallSlot<Req, Rsp>& slot =
+        slots_[correlation & ((1u << kIndexBits) - 1u)];
+    const std::uint32_t observed =
+        slot.state.load(std::memory_order_acquire);
+    // slot.correlation is stable in kTaken/kAbandoned (the slot cannot be
+    // recycled out of either state by anyone but this Reply) — and it is
+    // only READ under those states, so there is no race with a claimant.
+    if (observed == static_cast<std::uint32_t>(CallSlotState::kTaken) &&
+        slot.correlation == correlation) {
+      slot.response = response;  // exclusive: only Reply writes while kTaken
+      std::uint32_t expected =
+          static_cast<std::uint32_t>(CallSlotState::kTaken);
+      if (slot.state.compare_exchange_strong(
+              expected, static_cast<std::uint32_t>(CallSlotState::kReplied),
+              std::memory_order_acq_rel, std::memory_order_acquire)) {
+        client_waiter_.NotifyAll();
+        return ReplyStatus::kOk;
+      }
+      // The caller abandoned in the window — fall through to reclaim.
+    }
+    if (slot.state.load(std::memory_order_acquire) ==
+            static_cast<std::uint32_t>(CallSlotState::kAbandoned) &&
+        slot.correlation == correlation) {
+      // D20: the late reply is discarded, the slot reclaimed, and the
+      // discard is observable server-side.
+      slot.state.store(static_cast<std::uint32_t>(CallSlotState::kFree),
+                       std::memory_order_release);
+      client_waiter_.NotifyAll();  // a slot freed: wake slot-waiters
+      return ReplyStatus::kExpired;
+    }
+    return ReplyStatus::kExpired;  // stale token: slot already moved on
+  }
+
+  bool WaitForWork(Duration max_park) {
+    // D10: bounded park — returns when work arrives, a peer detaches
+    // (NotifyAll in RemoveClient/RemoveServer: the P0b "shutdown begins"
+    // signal — there is no domain-level shutdown verb; the application's
+    // own flag is re-checked by its loop on return), or max_park elapses.
+    return server_waiter_.WaitFor(max_park, [this] { return AnyPending(); });
+  }
+
+ private:
+  CallSlot<Req, Rsp>* TryClaim(std::uint32_t* index) {
+    for (std::uint32_t i = 0; i < kMaxInFlight; ++i) {
+      std::uint32_t expected =
+          static_cast<std::uint32_t>(CallSlotState::kFree);
+      if (slots_[i].state.compare_exchange_strong(
+              expected, static_cast<std::uint32_t>(CallSlotState::kClaimed),
+              std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        *index = i;
+        return &slots_[i];
+      }
+    }
+    return nullptr;
+  }
+
+  void ReleaseSlot(CallSlot<Req, Rsp>& slot) {
+    slot.state.store(static_cast<std::uint32_t>(CallSlotState::kFree),
+                     std::memory_order_release);
+    client_waiter_.NotifyAll();  // a slot freed: wake slot-waiters
+  }
+
+  bool AnyPending() const {
+    for (const auto& slot : slots_) {
+      if (slot.state.load(std::memory_order_acquire) ==
+          static_cast<std::uint32_t>(CallSlotState::kPending)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::array<CallSlot<Req, Rsp>, kMaxInFlight> slots_{};
+  std::atomic<std::uint64_t> next_correlation_{0};
+  FutexWaiter server_waiter_;  // parked by WaitForWorkOrShutdown
+  FutexWaiter client_waiter_;  // parked by Call (reply + slot acquisition)
+};
+
+// Combined R6 identity for an RPC topic: both directions participate, so a
+// Client<Req,Rsp> never matches a Server<Req,OtherRsp>. In-process interim,
+// like SchemaHashOf itself (schema_hash.hpp); the cross-process form is the
+// wire contract's problem at P1.
+template <typename Req, typename Rsp>
+std::uint64_t RpcSchemaHash() {
+  const std::uint64_t req = SchemaHashOf<Req>();
+  const std::uint64_t rsp = SchemaHashOf<Rsp>();
+  return (req * kFnv1aPrime) ^ rsp;
+}
+
+// ---------------------------------------------------------------------------
 // Domain state: one per isolation key, shared by every Domain constructed
 // with that key (D17). Owns the topic registry and the D16 match barrier.
 // ---------------------------------------------------------------------------
@@ -575,6 +913,40 @@ class SubImpl final : public EndpointImpl {
   }
 
   std::shared_ptr<SubCore<T>> core_{};
+};
+
+// RPC endpoint impls (M5). No per-endpoint core: the preallocated call
+// slots live on the topic (one server per topic, clients share the slot
+// array). `registered_` marks a successfully wired endpoint so a refused
+// or moved-from handle unregisters nothing.
+template <typename Req, typename Rsp>
+class ServerImpl final : public EndpointImpl {
+ public:
+  ~ServerImpl() override {
+    if (registered_ && topic_ != nullptr && state_ != nullptr) {
+      std::lock_guard<std::mutex> lock(state_->mutex_);
+      static_cast<RpcTopic<Req, Rsp>*>(topic_.get())->RemoveServer();
+      --state_->endpoint_count_;
+      state_->UpdateGauges();
+    }
+  }
+
+  bool registered_ = false;
+};
+
+template <typename Req, typename Rsp>
+class ClientImpl final : public EndpointImpl {
+ public:
+  ~ClientImpl() override {
+    if (registered_ && topic_ != nullptr && state_ != nullptr) {
+      std::lock_guard<std::mutex> lock(state_->mutex_);
+      static_cast<RpcTopic<Req, Rsp>*>(topic_.get())->RemoveClient();
+      --state_->endpoint_count_;
+      state_->UpdateGauges();
+    }
+  }
+
+  bool registered_ = false;
 };
 
 }  // namespace detail
@@ -854,9 +1226,12 @@ Sample<T> Subscriber<T>::TakeLatest() {
   // Counters (D9) + instruments (R11 §7). Allocation-free atomic updates.
   core.take_count.fetch_add(1, std::memory_order_relaxed);
   core.t_take.Add();
-  core.t_take_age.Record(
+  const double age_us =
       static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(age)
-                              .count()));
+                              .count());
+  core.t_take_age.Record(age_us);
+  // §7 per-hop: in-process, both ends share the clock by construction.
+  core.t_hop_latency.Record(age_us);
   const std::uint64_t last =
       core.last_consumed_ordinal.load(std::memory_order_relaxed);
   if (record.ordinal > last) {
@@ -918,9 +1293,11 @@ Sample<T> Subscriber<T>::TryTake() {
 
   core.take_count.fetch_add(1, std::memory_order_relaxed);
   core.t_take.Add();
-  core.t_take_age.Record(
+  const double age_us =
       static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(age)
-                              .count()));
+                              .count());
+  core.t_take_age.Record(age_us);
+  core.t_hop_latency.Record(age_us);  // §7 per-hop: shared clock in-process
   if (stale) {
     if (!core.stale_latched.exchange(true, std::memory_order_relaxed)) {
       core.deadline_miss_count.fetch_add(1, std::memory_order_relaxed);
@@ -930,6 +1307,179 @@ Sample<T> Subscriber<T>::TryTake() {
     core.stale_latched.store(false, std::memory_order_relaxed);
   }
   return sample;
+}
+
+// ---- Domain::Serve (D10; D18: never throws, check handle status) -----------
+template <typename Req, typename Rsp>
+Server<Req, Rsp> Domain::Serve(std::string_view topic) {
+  // P0b in-process bound, mirroring Advertise/Subscribe: requests and
+  // responses cross the slot array by copy.
+  static_assert(std::is_default_constructible_v<Req> &&
+                    std::is_copy_assignable_v<Req> &&
+                    std::is_default_constructible_v<Rsp> &&
+                    std::is_copy_assignable_v<Rsp>,
+                "xmMessaging (P0b in-process): RPC payloads must be "
+                "default-constructible and copy-assignable (call slots pass "
+                "them by copy; Request/Result are value-semantic)");
+  Server<Req, Rsp> handle;
+  auto impl = std::make_unique<detail::ServerImpl<Req, Rsp>>();
+  impl->is_publisher_ = true;  // matching: a server is the topic's one peer
+  if (impl_ != nullptr && impl_->available()) {
+    auto state = impl_->state_;
+    std::lock_guard<std::mutex> lock(state->mutex_);
+    auto& entry = state->topics_[std::string(topic)];
+    const std::uint64_t hash = detail::RpcSchemaHash<Req, Rsp>();
+    if (entry == nullptr) {
+      entry = std::make_shared<detail::RpcTopic<Req, Rsp>>(std::string(topic),
+                                                           hash);
+    }
+    if (entry->schema_hash_ != hash ||
+        *entry->type_ != typeid(detail::RpcTag<Req, Rsp>)) {
+      impl->advertise_status_ = AdvertiseStatus::kTypeMismatch;  // R6
+    } else {
+      auto* typed = static_cast<detail::RpcTopic<Req, Rsp>*>(entry.get());
+      impl->advertise_status_ = typed->AddServer();
+      if (impl->advertise_status_ == AdvertiseStatus::kOk) {
+        impl->registered_ = true;
+        impl->topic_ = entry;
+        impl->state_ = state;
+        ++state->endpoint_count_;
+        state->UpdateGauges();
+      }
+    }
+  }
+  handle.impl_ = impl.release();
+  return handle;
+}
+
+// ---- Domain::Client (D11) ---------------------------------------------------
+template <typename Req, typename Rsp>
+Client<Req, Rsp> Domain::Client(std::string_view topic) {
+  static_assert(std::is_default_constructible_v<Req> &&
+                    std::is_copy_assignable_v<Req> &&
+                    std::is_default_constructible_v<Rsp> &&
+                    std::is_copy_assignable_v<Rsp>,
+                "xmMessaging (P0b in-process): RPC payloads must be "
+                "default-constructible and copy-assignable (call slots pass "
+                "them by copy; Request/Result are value-semantic)");
+  ::xmotion::messaging::Client<Req, Rsp> handle;
+  auto impl = std::make_unique<detail::ClientImpl<Req, Rsp>>();
+  if (impl_ != nullptr && impl_->available()) {
+    auto state = impl_->state_;
+    std::lock_guard<std::mutex> lock(state->mutex_);
+    auto& entry = state->topics_[std::string(topic)];
+    const std::uint64_t hash = detail::RpcSchemaHash<Req, Rsp>();
+    if (entry == nullptr) {
+      entry = std::make_shared<detail::RpcTopic<Req, Rsp>>(std::string(topic),
+                                                           hash);
+    }
+    if (entry->schema_hash_ != hash ||
+        *entry->type_ != typeid(detail::RpcTag<Req, Rsp>)) {
+      impl->subscribe_status_ = SubscribeStatus::kTypeMismatch;  // R6
+    } else {
+      auto* typed = static_cast<detail::RpcTopic<Req, Rsp>*>(entry.get());
+      typed->AddClient();
+      impl->registered_ = true;
+      impl->topic_ = entry;
+      impl->state_ = state;
+      impl->subscribe_status_ = SubscribeStatus::kOk;
+      ++state->endpoint_count_;
+      state->UpdateGauges();
+    }
+  }
+  handle.impl_ = impl.release();
+  return handle;
+}
+
+// ---- Server<Req, Rsp> ---------------------------------------------------------
+template <typename Req, typename Rsp>
+Server<Req, Rsp>::Server(Server&& other) noexcept = default;
+template <typename Req, typename Rsp>
+Server<Req, Rsp>& Server<Req, Rsp>::operator=(Server&& other) noexcept =
+    default;
+template <typename Req, typename Rsp>
+Server<Req, Rsp>::~Server() = default;
+
+template <typename Req, typename Rsp>
+AdvertiseStatus Server<Req, Rsp>::status() const noexcept {
+  return impl_ != nullptr
+             ? static_cast<const detail::ServerImpl<Req, Rsp>*>(impl_)
+                   ->advertise_status_
+             : AdvertiseStatus::kUnsupportedReach;
+}
+
+template <typename Req, typename Rsp>
+Request<Req> Server<Req, Rsp>::TakeRequest() {
+  auto* impl = static_cast<detail::ServerImpl<Req, Rsp>*>(impl_);
+  assert(impl != nullptr && impl->advertise_status_ == AdvertiseStatus::kOk &&
+         "xmMessaging: TakeRequest on a non-kOk Server is a contract "
+         "violation (D18)");
+  if (impl == nullptr || !impl->registered_) {
+    return Request<Req>();  // kNone: safe no-op in release
+  }
+  auto* topic = static_cast<detail::RpcTopic<Req, Rsp>*>(impl->topic_.get());
+  return topic->TakeRequest();
+}
+
+template <typename Req, typename Rsp>
+ReplyStatus Server<Req, Rsp>::Reply(const Request<Req>& request,
+                                    const Rsp& response) {
+  auto* impl = static_cast<detail::ServerImpl<Req, Rsp>*>(impl_);
+  assert(impl != nullptr && impl->advertise_status_ == AdvertiseStatus::kOk &&
+         "xmMessaging: Reply on a non-kOk Server is a contract violation "
+         "(D18)");
+  assert(request.freshness() != Freshness::kNone &&
+         "xmMessaging: replying to a kNone request is a contract violation "
+         "(D2 rule applied to the RPC surface)");
+  if (impl == nullptr || !impl->registered_ ||
+      request.freshness() == Freshness::kNone) {
+    return ReplyStatus::kExpired;  // safe verdict in release
+  }
+  auto* topic = static_cast<detail::RpcTopic<Req, Rsp>*>(impl->topic_.get());
+  return topic->Reply(request.correlation_, response);
+}
+
+template <typename Req, typename Rsp>
+bool Server<Req, Rsp>::WaitForWorkOrShutdown(Duration max_park) {
+  auto* impl = static_cast<detail::ServerImpl<Req, Rsp>*>(impl_);
+  assert(impl != nullptr && impl->advertise_status_ == AdvertiseStatus::kOk &&
+         "xmMessaging: WaitForWorkOrShutdown on a non-kOk Server is a "
+         "contract violation (D18)");
+  if (impl == nullptr || !impl->registered_) {
+    return false;
+  }
+  auto* topic = static_cast<detail::RpcTopic<Req, Rsp>*>(impl->topic_.get());
+  return topic->WaitForWork(max_park);
+}
+
+// ---- Client<Req, Rsp> ---------------------------------------------------------
+template <typename Req, typename Rsp>
+Client<Req, Rsp>::Client(Client&& other) noexcept = default;
+template <typename Req, typename Rsp>
+Client<Req, Rsp>& Client<Req, Rsp>::operator=(Client&& other) noexcept =
+    default;
+template <typename Req, typename Rsp>
+Client<Req, Rsp>::~Client() = default;
+
+template <typename Req, typename Rsp>
+SubscribeStatus Client<Req, Rsp>::status() const noexcept {
+  return impl_ != nullptr
+             ? static_cast<const detail::ClientImpl<Req, Rsp>*>(impl_)
+                   ->subscribe_status_
+             : SubscribeStatus::kUnsupportedReach;
+}
+
+template <typename Req, typename Rsp>
+Result<Rsp> Client<Req, Rsp>::Call(const Req& request, Duration deadline) {
+  auto* impl = static_cast<detail::ClientImpl<Req, Rsp>*>(impl_);
+  assert(impl != nullptr && impl->subscribe_status_ == SubscribeStatus::kOk &&
+         "xmMessaging: Call on a non-kOk Client is a contract violation "
+         "(D18)");
+  if (impl == nullptr || !impl->registered_) {
+    return Result<Rsp>();  // kNoServer: nothing can serve an unwired handle
+  }
+  auto* topic = static_cast<detail::RpcTopic<Req, Rsp>*>(impl->topic_.get());
+  return topic->Call(request, deadline);
 }
 
 // ---- introspect (D9) -------------------------------------------------------

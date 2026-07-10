@@ -5,7 +5,7 @@
 
 include(GoogleTest)
 
-foreach(scenario IN ITEMS m1 m2 m3 m14)
+foreach(scenario IN ITEMS m1 m2 m3 m5 m6 m7 m13 m14)
   add_executable(${scenario}_behavioral_test ${scenario}_behavioral_test.cpp)
   target_link_libraries(${scenario}_behavioral_test PRIVATE
       xmotion::xmmessaging gtest gtest_main)

@@ -34,6 +34,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P1 — iceoryx2 backend (inter-process)
 
+- [ ] RPC follow-ups from P0b: Qos-declared max-in-flight (fixed 8 now); §7 RPC-endpoint instruments (spec gap); per-instrument labels/units await xmBase metric-API labels; lifecycle signal for WaitForWorkOrShutdown shutdown leg
 - [ ] version pin + churn-absorption policy (ADR 0006 open question 1)
 - [ ] M1/M2/M3 cross-process, M4 crash recovery, M6 two-process leg
 - [ ] M9 backend layer: wrapper-overhead A/B vs raw iceoryx2, budget pinned + CI-gated
