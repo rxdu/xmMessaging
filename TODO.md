@@ -10,8 +10,8 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [x] M5 request/response wish-code (deltas D10-D11: threadless take/reply server, non-defaultable deadline)
 - [x] M6 reach-parametric fixture wish-code (delta D12: per-backend Domain factories, Supports() matrix query, age_class)
 - [x] M7 trace-continuity wish-code (delta D13: auto-capture on publish, explicit RAII adopt on take)
-- [ ] M13 pipeline-lineage wish-code + M14 stack-startup wish-code (contracts specified 2026-07-10; deltas D14-D17 recorded from the review)
-- [~] Record API deltas in scenarios.md (D1-D17 recorded); freeze P0a header design from them
+- [x] M13 pipeline-lineage wish-code + M14 stack-startup wish-code (deltas D14-D18)
+- [~] Record API deltas in scenarios.md (D1-D18 recorded); freeze P0a header design from them
 
 ## P0a — API headers + in-process reach skeleton
 
@@ -28,7 +28,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] queue<N> + reliability policies
 - [ ] `messaging.*` self-instrumentation
 - [ ] M9 in-process benchmark layer (`bench/`: per-verb micro + hop-path; JSON report, CI artifact)
-- [ ] M1, M2, M3, M5, M6(in-proc), M7(in-proc) + M9(in-proc) — **v0.1 gate**
+- [ ] M1, M2, M3, M5, M6(in-proc), M7(in-proc), M13(in-proc), M14(in-proc) + M9(in-proc) — **v0.1 gate**
 
 ## P1 — iceoryx2 backend (inter-process)
 
