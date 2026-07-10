@@ -10,13 +10,14 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [x] M5 request/response wish-code (deltas D10-D11: threadless take/reply server, non-defaultable deadline)
 - [x] M6 reach-parametric fixture wish-code (delta D12: per-backend Domain factories, Supports() matrix query, age_class)
 - [x] M7 trace-continuity wish-code (delta D13: auto-capture on publish, explicit RAII adopt on take)
-- [~] Record API deltas in scenarios.md (D1-D13 recorded); freeze P0a header design from them
+- [ ] M13 pipeline-lineage wish-code + M14 stack-startup wish-code (contracts specified 2026-07-10; deltas D14-D17 recorded from the review)
+- [~] Record API deltas in scenarios.md (D1-D17 recorded); freeze P0a header design from them
 
 ## P0a — API headers + in-process reach skeleton
 
 - [ ] `include/xmmessaging/` API tier (Domain, Advertise/Subscribe, QoS vocabulary, statuses) — incl. Domain::PosixShm() factory alongside InProcess/Iceoryx2/Zenoh
 - [ ] schema-hash mechanism (R6): compile-time layout hash + endpoint match slot — designed before the API freezes; algorithm defined over wire layout, language-neutral, with conformance vectors (R10)
-- [ ] wire-contract spec skeleton (R10): envelope byte layout, payload layout rules (standard-layout, explicit padding), topic/QoS conventions — versioned doc under docs/
+- [ ] wire-contract spec skeleton (R10): envelope byte layout incl. lineage fields (origin stamp + hop count, D14), payload layout rules (standard-layout, explicit padding), topic/QoS conventions, standard metric schema (R11) — versioned doc under docs/
 - [ ] per-reach support matrix representation (R3): queryable at wiring time
 - [ ] xmBase dependency resolution (in-tree > installed > bundled submodule, xmTelemetry pattern)
 - [ ] M8 lib-only link test (zero transport deps by default)
