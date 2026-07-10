@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
@@ -150,4 +151,181 @@ TEST(M2Behavioral, A3_IndependentMailboxes) {
   // read, not a pop) and never disturb the neighbors.
   EXPECT_EQ((*sub_a.TakeLatest()).seq, 2u);
   EXPECT_EQ((*sub_b.TakeLatest()).seq, 2u);
+}
+
+// -- D6 regression: a joiner is never charged for pre-join values ------------
+//
+// The overwrite baseline must be the topic's accepted ordinal AT the attach
+// point, not a value read before it. A stale (pre-attach) baseline charges
+// the joiner's overwrite counter with values that were never delivered to
+// its mailbox — including the warm-start seed itself, which D6 classifies
+// as pre-join history ("values published before the join are not charged").
+// This test is deterministic: with the stale baseline (seed ordinal - 1)
+// the first post-join take charges the overwritten SEED as an overwrite.
+TEST(M2Behavioral, D6_JoinerNotChargedForPreJoinValues) {
+  auto domain = msg::Domain::InProcess({.name = "m2_d6"});
+  auto pub = domain.Advertise<RobotState>(
+      "m2.robot.state", {.history = msg::History::LatestOnly()});
+
+  for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+    pub.Publish({.x = 0, .y = 0, .yaw = 0, .seq = seq});
+  }
+
+  auto joiner = domain.Subscribe<RobotState>(
+      "m2.robot.state", {.history = msg::History::LatestOnly()});
+
+  // The joiner never reads its warm-start seed (value 5); the next publish
+  // overwrites it. Everything up to and including the seed is PRE-JOIN
+  // history — none of it may appear on the joiner's overwrite counter.
+  pub.Publish({.x = 0, .y = 0, .yaw = 0, .seq = 6});
+  auto first = joiner.TakeLatest();
+  ASSERT_EQ(first.freshness(), msg::Freshness::kFresh);
+  EXPECT_EQ((*first).seq, 6u);
+  EXPECT_EQ(msg::introspect::OverwriteCount(joiner), 0u)
+      << "pre-join values (including the unread warm-start seed) were "
+         "charged to the joiner's overwrite counter (D6 violation)";
+
+  // POST-join overwrites ARE charged, exactly: value 7 was delivered to
+  // this mailbox and overwritten unread by value 8.
+  pub.Publish({.x = 0, .y = 0, .yaw = 0, .seq = 7});
+  pub.Publish({.x = 0, .y = 0, .yaw = 0, .seq = 8});
+  EXPECT_EQ((*joiner.TakeLatest()).seq, 8u);
+  EXPECT_EQ(msg::introspect::OverwriteCount(joiner), 1u);
+}
+
+// -- D6 regression: mid-stream join races an in-flight publisher --------------
+//
+// Subscribe() runs under the wiring mutex, but the latest-only Publish hot
+// path never takes that mutex — a joiner's accounting baseline therefore
+// races in-flight publishes (TOCTOU: baseline read vs. mailbox attach).
+// Publishes that land between the two are invisible to the new mailbox
+// (correct) and must NOT be charged to the joiner's overwrite counter.
+//
+// Detection: seq is published 1,2,3,... by a single publisher on a topic
+// that never refuses, so payload seq == accepted ordinal exactly. At each
+// quiescent point `published` is the topic's accepted ordinal, so a floor
+// F read from it before Subscribe() bounds every legitimate charge: a
+// correct baseline is >= F, hence after the joiner's FIRST take (ordinal
+// o1) its overwrite counter is at most o1 - F - 1. A stale baseline
+// charges the seed and every in-flight publish that raced the join, which
+// pushes the counter past that bound. The publisher sweeps its burst start
+// across the join window (deterministic delay ladder) so, over the join
+// cycles, bursts land inside the Subscribe() race window with real
+// probability; the assertion itself holds for ALL interleavings of a
+// correct implementation (no flake), and any single overcount trips it.
+TEST(M2Behavioral, D6_MidStreamJoinAccountingRace) {
+  constexpr int kCycles = 200;
+  constexpr int kBurst = 2000;
+
+  auto domain = msg::Domain::InProcess({.name = "m2_d6_race"});
+  auto pub = domain.Advertise<RobotState>(
+      "m2.race.state", {.history = msg::History::LatestOnly()});
+
+  std::atomic<int> go{0};
+  std::atomic<int> started{0};
+  std::atomic<int> done{0};
+  std::atomic<std::uint64_t> published{0};
+
+  std::thread publisher([&] {
+    std::uint64_t seq = 0;
+    int cycle = 0;
+    for (;;) {
+      const int g = go.load(std::memory_order_acquire);
+      if (g < 0) {
+        break;
+      }
+      if (g == cycle) {
+        std::this_thread::yield();
+        continue;
+      }
+      cycle = g;
+      // Delay ladder: walk the burst start across the Subscribe() window
+      // (0..20us in 500ns steps) so cycles land before, inside, and after
+      // the join even as build/instrumentation timing shifts.
+      const auto until = std::chrono::steady_clock::now() +
+                         std::chrono::nanoseconds(500) * (cycle % 40);
+      while (std::chrono::steady_clock::now() < until) {
+      }
+      for (int i = 0; i < kBurst; ++i) {
+        pub.Publish({.x = 0, .y = 0, .yaw = 0, .seq = ++seq});
+        if (i == 0) {
+          started.store(cycle, std::memory_order_release);
+        }
+      }
+      published.store(seq, std::memory_order_release);
+      done.store(cycle, std::memory_order_release);
+    }
+  });
+
+  for (int c = 1; c <= kCycles; ++c) {
+    // Quiescent floor: the publisher is idle (done == c-1), so `published`
+    // IS the accepted ordinal right now; the join point can only be later.
+    const std::uint64_t floor = published.load(std::memory_order_acquire);
+
+    go.store(c, std::memory_order_release);        // burst races the join
+    auto joiner = domain.Subscribe<RobotState>(
+        "m2.race.state", {.history = msg::History::LatestOnly()});
+
+    // Hold the first take until the burst is in flight. This maximizes the
+    // exposure of the joiner's accounting baseline: if the seed were taken
+    // first the counter would start from the seed regardless of where the
+    // baseline was placed, masking a stale one.
+    while (started.load(std::memory_order_acquire) != c) {
+      std::this_thread::yield();
+    }
+    msg::Sample<RobotState> first;
+    do {
+      first = joiner.TakeLatest();
+    } while (first.freshness() == msg::Freshness::kNone);
+    const std::uint64_t o1 = (*first).seq;
+    const std::uint64_t w1 = msg::introspect::OverwriteCount(joiner);
+
+    // THE regression assertion. Values <= floor predate the join; a
+    // correct baseline sits at or above it, so the first take can charge
+    // at most the post-floor, pre-o1 values. A stale baseline also
+    // charges the seed + the publishes that raced Subscribe() itself.
+    const std::uint64_t bound = o1 > floor ? o1 - floor - 1 : 0;
+    EXPECT_LE(w1, bound)
+        << "cycle " << c << ": joiner overwrite counter charged values "
+        << "never delivered to it (stale pre-attach baseline); first-seen "
+        << "ordinal " << o1 << ", pre-join floor " << floor;
+    if (w1 > bound) {
+      break;  // failure recorded; exit so the publisher joins cleanly
+    }
+
+    // Drain the burst, then reconcile the post-join stream exactly: from
+    // the second distinct value onward every publisher ordinal must be
+    // accounted as seen or overwritten — no loss, no phantom (M1-A5/D9).
+    std::uint64_t last_seen = o1;
+    std::uint64_t o2 = 0;
+    std::uint64_t w2 = 0;
+    std::uint64_t distinct_after_o2 = 0;
+    for (;;) {
+      auto taken = joiner.TakeLatest();
+      const std::uint64_t v = (*taken).seq;
+      if (v != last_seen) {
+        last_seen = v;
+        if (o2 == 0) {
+          o2 = v;
+          w2 = msg::introspect::OverwriteCount(joiner);
+        } else {
+          ++distinct_after_o2;
+        }
+      }
+      if (done.load(std::memory_order_acquire) == c &&
+          last_seen == published.load(std::memory_order_acquire)) {
+        break;
+      }
+    }
+    if (o2 != 0) {
+      const std::uint64_t final_seq = published.load(std::memory_order_acquire);
+      EXPECT_EQ(msg::introspect::OverwriteCount(joiner) - w2 +
+                    distinct_after_o2,
+                final_seq - o2)
+          << "cycle " << c << ": post-join reconciliation broke";
+    }
+  }
+
+  go.store(-1, std::memory_order_release);
+  publisher.join();
 }

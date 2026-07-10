@@ -228,9 +228,14 @@ struct SubCore {
   std::atomic<std::uint64_t> overwrite_count{0};
   std::atomic<std::uint64_t> deadline_miss_count{0};
 
-  // Ordinal-gap accounting state (see the header comment). Owned by the
-  // consuming thread; atomic so introspection from other threads is clean.
-  std::atomic<std::uint64_t> last_consumed_ordinal{0};
+  // Ordinal-gap accounting state (see the header comment). Starts at
+  // kBaselineUnset; the D6 join point is stamped by the first publish that
+  // actually delivers into this mailbox (Topic::Deliver), after which the
+  // field is advanced by the consuming thread only; atomic so introspection
+  // from other threads is clean. Ordinals are 1-based, so the sentinel can
+  // never collide with a real baseline.
+  static constexpr std::uint64_t kBaselineUnset = UINT64_MAX;
+  std::atomic<std::uint64_t> last_consumed_ordinal{kBaselineUnset};
   // D3: the deadline-miss event fires on the Fresh->Stale TRANSITION.
   std::atomic<bool> stale_latched{false};
 };
@@ -344,17 +349,12 @@ class Topic final : public TopicBase {
     if (core->latest != nullptr) {
       // D6 warm start: seed the new mailbox from the current slot value,
       // ORIGINAL envelope included (M2-A1: the stamp is the publish stamp,
-      // so age reports the truth). Values published before the join are
-      // not charged to this subscriber's overwrite counter.
+      // so age reports the truth). Seeding must stay BEFORE the attach
+      // below: LatestSlot is single-writer, and the moment the attach
+      // store lands a racing Deliver may write this mailbox.
       MailRecord<T> current;
       if (master_.Load(current)) {
         core->latest->Store(current);
-        core->last_consumed_ordinal.store(current.ordinal - 1,
-                                          std::memory_order_relaxed);
-      } else {
-        core->last_consumed_ordinal.store(
-            accepted_ordinal_.load(std::memory_order_relaxed),
-            std::memory_order_relaxed);
       }
     }
     for (auto& slot : sub_slots_) {
@@ -362,6 +362,22 @@ class Topic final : public TopicBase {
         // Publish order: the core is fully seeded BEFORE it becomes
         // visible to the fan-out loop (release), so a racing publish can
         // only ever add newer records on top of the seed.
+        //
+        // The D6 accounting baseline is deliberately NOT set here. Any
+        // wiring-time read of accepted_ordinal_ races the lock-free
+        // Deliver: read it before this attach store and publishes landing
+        // in between are never delivered here yet sit above the stale
+        // baseline — charged to this subscriber's overwrite_count at its
+        // first take, violating D6 ("values published before the join are
+        // not charged") and the exact reconciliation (M1-A5/M3-A2/D9).
+        // Reading it after the attach is a store-buffering shape against
+        // Deliver's {fetch_add; slot.load} and is only sound with seq_cst
+        // on the PUBLISH hot path — R7-hostile. The core therefore
+        // attaches with last_consumed_ordinal == kBaselineUnset and the
+        // join point is stamped by the first publish that actually
+        // delivers into this mailbox (see Deliver): the publisher is the
+        // sole ordinal author, so for it "before or after the attach" is
+        // never ambiguous.
         slot.store(core.get(), std::memory_order_release);
         sub_retained_.push_back(core);
         subscriber_count_.fetch_add(1, std::memory_order_relaxed);
@@ -445,6 +461,34 @@ class Topic final : public TopicBase {
         continue;
       }
       if (sub->latest != nullptr) {
+        if (sub->last_consumed_ordinal.load(std::memory_order_relaxed) ==
+            SubCore<T>::kBaselineUnset) {
+          // First delivery into a fresh mailbox: stamp the D6 join point
+          // as "everything before this record is pre-join". Publishes
+          // that raced the attach and missed this slot stay at or below
+          // the baseline (never delivered -> never charged); everything
+          // from this record on is counted exactly by take-time gap
+          // accounting. The publisher authors the ordinals, so no
+          // cross-thread ordering question ("was that publish before or
+          // after the attach?") exists here — this removes the TOCTOU a
+          // wiring-time baseline has, without fencing the hot path.
+          // Steady-state cost: the relaxed load above only.
+          //
+          // Ordering: this stamp is sequenced before the mailbox Store
+          // below, and the mailbox's release/acquire pair (seqlock W2/R1,
+          // or the mutex slot) publishes both together — a take that
+          // observes a DELIVERED record therefore also observes a
+          // baseline <= that record's ordinal - 1 (relaxed suffices on
+          // both sides; the mailbox carries the happens-before). A CAS
+          // rather than a plain store only to keep the stamp one-shot
+          // against any future writer; today it cannot lose: writers are
+          // serialized per topic (D15) and the take side never writes
+          // while the baseline is unset (see TakeLatest).
+          std::uint64_t expected = SubCore<T>::kBaselineUnset;
+          sub->last_consumed_ordinal.compare_exchange_strong(
+              expected, record.ordinal - 1, std::memory_order_relaxed,
+              std::memory_order_relaxed);
+        }
         sub->latest->Store(record);  // overwrite, never refuse
       } else if (sub->queue != nullptr) {
         if (sub->queue->TryPush(record)) {
@@ -1248,6 +1292,16 @@ Sample<T> Subscriber<T>::TakeLatest() {
   core.t_hop_latency.Record(age_us);
   const std::uint64_t last =
       core.last_consumed_ordinal.load(std::memory_order_relaxed);
+  // last == kBaselineUnset means no publish has delivered into this mailbox
+  // yet, so this record can only be the warm-start seed: pre-join history
+  // (D6), returned but never charged and never advancing the baseline. (A
+  // taker that observes a DELIVERED record also observes the baseline the
+  // delivering publisher stamped before its mailbox Store — the mailbox's
+  // release/acquire pair carries it; see Deliver. And the take side must
+  // NOT author a baseline itself: its stamp could race a publisher
+  // mid-fan-out and win, leaving a seed-level baseline that charges the
+  // never-delivered ordinals between the seed and that first delivery.)
+  // The sentinel needs no branch: no real ordinal compares greater than it.
   if (record.ordinal > last) {
     const std::uint64_t gap = record.ordinal - last - 1;
     if (gap > 0) {
