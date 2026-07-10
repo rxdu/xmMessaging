@@ -9,6 +9,16 @@
 
 xmMessaging (`xmotion::messaging`) moves typed data between the components an application composes. It is the glue tier of ADR 0005 made concrete: algorithm components (xmNavigation) and hardware components (xmDriver) keep producing and consuming plain xmBase types and **never link this library**; applications link it to wire those components into a running system.
 
+## Requirements
+
+Stated explicitly (2026-07-10) so every design choice below and every scenario in [scenarios.md](scenarios.md) traces to one:
+
+- **R1 — Lightweight and portable.** Trivial to set up across Linux distros: xmBase is the only mandatory dependency, plain CMake ≥ 3.16, Ubuntu 22.04/24.04 as the tested baseline. Each backend is acquired by one declared mechanism (pinned submodule or system package) behind its option — enabling a backend must never turn into a toolchain project. Traced by M8; the deb packaging follows the family pattern.
+- **R2 — A clear, small API.** The surface stays countable: `Domain`, `Advertise`/`Subscribe`, `Publish`/`Loan`/take, `Client`/`Server`, the four QoS knobs, and the status enums — nothing else. Every scenario doubles as a usage example; a cookbook page accompanies the v0.1 release. Traced by every scenario (wish-code *is* the usability test: if the wish-code reads awkwardly, the API is wrong — deltas get recorded, not tolerated).
+- **R3 — A thin wrapper.** The library adds conventions and type safety over the engines, not a new middleware: no hidden threads, no hidden allocation, no policy magic the user didn't select. Two concrete commitments: (a) a **native escape hatch** — `Native()` on endpoints exposes the underlying backend handle for anything the portable surface doesn't cover, explicitly non-portable by declaration; (b) a **measured overhead budget** — wrapper cost over the raw backend is benchmarked per verb and regression-gated, not asserted. Traced by M9.
+- **R4 — First-class performance benchmarks.** A user evaluating this module must be able to run one command and get latency/throughput/jitter per reach on their own hardware, comparable against published reference numbers and against the raw backend. The benchmark suite is in-tree, CI-run, and its results are release artifacts. Traced by M9.
+- **R5 — Runtime introspection.** Diagnostics must not require rebuilding or cooperating application code: transport health (topics, endpoints, rates, queue depths, drops, staleness) is observable from *outside* the process at runtime — the Aeron shared-memory-counters idea adopted in ADR 0006, plus a CLI tool to read it. Traced by M10.
+
 ## One API, three reaches
 
 The central design commitment (decided 2026-07-10, extending the planning–control coupling design of 2026-07-06): the same typed publish/subscribe and request/response surface serves three *reaches*, selected by the application at wiring time — the call sites do not change.
@@ -22,6 +32,8 @@ The central design commitment (decided 2026-07-10, extending the planning–cont
 Why one surface: the 2026-07-06 planning–control design showed the coupling pattern (planner produces at ~10 Hz, controller consumes latest at 100 Hz+) is identical whether the two live in one process or two. Making reach a wiring-time property means an application can start single-process (simplest to debug), split when a deployment needs it, and distribute when a host boundary appears — without touching component code or the loop.
 
 The in-process reach is not a degenerate case; it is the reference semantics. Every QoS contract below is defined by its in-process behavior first, and each backend must reproduce that contract (the scenario suite enforces this — see M6 in [scenarios.md](scenarios.md)).
+
+Reach transparency is scoped by R3: the portable surface covers the contracts named in this document, and *only* those. Backend capabilities beyond them are reached through the native escape hatch, not absorbed into the API — the wrapper stays thin instead of growing toward the union of its engines.
 
 ## The QoS vocabulary
 
@@ -57,9 +69,15 @@ Every message carries the xmBase telemetry context bytes (`Inject`/`Extract` —
 
 `Publish` on a `reliable` endpoint returns a status — delivered, would-block, loan-exhausted — never a silent drop, and `best-effort` drops are always counted. ADR 0006 open question 6 is hereby answered **yes**: the explicit-status surface is universal. The scenario suite (M3) is the enforcement.
 
-## Self-instrumentation
+## Self-instrumentation and introspection (R5)
 
 The layer is observable like everything else in the family: queue depths, drop counters, hop latency histograms, and deadline-miss events are ordinary xmBase telemetry instruments (`messaging.*` namespace), emitted by the library itself with zero application code.
+
+Beyond the in-process telemetry, the transport publishes its health counters through a shared-memory introspection segment that **any** process can read without the application's cooperation (the Aeron lesson ADR 0006 chose to steal; eCAL's monitor tooling is the usability bar). A CLI tool ships with the library: list live topics and endpoints, show per-topic rate / queue depth / drops / last-publish age, and follow a topic's health live — the first thing a user reaches for when "the controller isn't getting plans" happens on a robot.
+
+## Performance benchmarks (R4)
+
+`bench/` is a first-class tier next to `test/`: per-verb micro-benchmarks (publish, loan, take — the R3 overhead budget vs the raw backend) and per-reach message-path benchmarks (latency percentiles, throughput, jitter across payload sizes). One command runs the suite and emits a machine-readable report; CI publishes it per release and gates on regression against pinned reference numbers. Users evaluate the module on their own hardware with the same command (the ros2_tracing overhead-evaluation pattern, applied transport-wide).
 
 ## Request/response
 

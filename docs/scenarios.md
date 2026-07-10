@@ -12,7 +12,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 2. **Behavioral test (P0b+)** — compiled against the real API; acceptance criteria asserted with gtest.
 3. **Benchmark / regression (P1+)** — M1 and M3 become permanent latency/back-pressure gates run in CI on every change.
 
-**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8 pass as behavioral tests on the in-process reach. M4 requires iceoryx2 (P1); M7's cross-process half requires a real IPC backend; M5 lands with the first backend that carries it.
+**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8 pass as behavioral tests on the in-process reach, plus M9's in-process benchmark layer (a release without its reference numbers violates R4). M4 and M10 require iceoryx2 (P1); M7's cross-process half requires a real IPC backend; M5 lands with the first backend that carries it.
 
 ## Conventions established here
 
@@ -33,7 +33,9 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 | M5 | Request/response with deadline | `test/scenarios/m5_request_response.cpp` | typed RPC, absent-server & timeout statuses | reach-parametric | P0b (in-proc), P1+ |
 | M6 | Reach transparency | `test/scenarios/m6_reach_transparency.cpp` | same composition code across thread/process/host | all three | P0b → P2 (grows with backends) |
 | M7 | Trace continuity across the hop | `test/scenarios/m7_trace_continuity.cpp` | envelope carries telemetry context | reach-parametric | P0b, P1 |
-| M8 | Lib-only build / backend optionality | `test/scenarios/m8_libonly_build.cpp` + link test | in-proc reach with zero transport deps | in-process | P0a |
+| M8 | Lib-only build / backend optionality | `test/scenarios/m8_libonly_build.cpp` + link test | in-proc reach with zero transport deps (R1) | in-process | P0a |
+| M9 | Benchmark suite & wrapper-overhead budget | `bench/` | thin wrapper, measured (R3, R4) | all three | P0b (in-proc), grows with backends |
+| M10 | External introspection | `test/scenarios/m10_introspection.cpp` + CLI | outside-the-process diagnostics (R5) | inter-process | P1 |
 
 ---
 
@@ -130,6 +132,32 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A1: default configuration (`XMMESSAGING_WITH_ICEORYX2=OFF`, `XMMESSAGING_WITH_ZENOH=OFF`) builds and passes in-proc scenarios with xmBase as the only family dependency.
 - A2: requesting an inter-process/inter-host reach at wiring time in a lib-only build fails at compile time (preferred) or with an explicit unsupported-reach status — never a silent in-proc fallback: a robot that silently isn't distributed is a field incident.
 - A3: each backend option adds only its own dependency (verified by dependency-closure diff in CI).
+
+## M9 — Benchmark suite & wrapper-overhead budget
+
+**Purpose.** R3 and R4 made falsifiable: "thin" and "fast" are measured claims, and a user must be able to reproduce the measurement on their own hardware with one command.
+
+**Setup.** `bench/` tier (google-benchmark), two layers. *Micro*: per-verb cost — `Publish`, `Loan`+`Publish`, take — on the in-process reach, and the same verbs through each backend **paired with the identical operation on the raw backend API**, so wrapper overhead is a direct A/B. *Path*: end-to-end hop latency percentiles (p50/p99/max), throughput, and jitter per reach, swept across payload sizes ({64 B, 1 KiB, 64 KiB, 1 MiB}) and the M1 rate profile.
+
+**Acceptance criteria.**
+- A1: one command (`ctest` label or `scripts/bench.sh`) runs the full suite and emits a machine-readable report (JSON) plus a human summary.
+- A2: wrapper overhead per verb vs the raw backend stays within a pinned budget (target set at P1 calibration; the point is the *gate exists*, per-verb, in CI).
+- A3: in-process publish and take are allocation-free and lock-free, proven by probe, at every payload size in the sweep.
+- A4: results are published as CI artifacts per release, and the README table of reference numbers is generated from them — never hand-written.
+- A5: a regression against the pinned reference (beyond noise bounds) fails CI, same discipline as the telemetry S1 overhead gate.
+
+## M10 — External introspection
+
+**Purpose.** R5 as a test: when "the controller isn't getting plans" happens on a robot, diagnosis must not require rebuilding, instrumenting, or even cooperating application code.
+
+**Setup.** The M1 pair runs as two unmodified processes (inter-process reach). A third process — the CLI tool, plus a raw reader in the test — attaches to the introspection segment. Fault injections: planner paused (staleness), consumer stalled (queue growth/drops), planner killed (endpoint death).
+
+**Acceptance criteria.**
+- A1: the external process enumerates live topics and endpoints with types, QoS, and owning PIDs — with zero cooperation from the observed processes.
+- A2: per-topic rate, queue depth, drop/overwrite counters, and last-publish age read externally reconcile with the application's own `messaging.*` telemetry.
+- A3: each injected fault is diagnosable from the CLI output alone (staleness rises; drops count up; the dead endpoint is marked, not vanished silently).
+- A4: attaching/detaching the observer is invisible to the observed processes' latency profile (measured against an M9 baseline run).
+- A5: reading the segment is safe against a concurrently crashing publisher — the observer never blocks, crashes, or reads torn counters.
 
 ---
 

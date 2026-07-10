@@ -23,12 +23,15 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter)
 - [ ] queue<N> + reliability policies
 - [ ] `messaging.*` self-instrumentation
-- [ ] M1, M2, M3, M5, M6(in-proc), M7(in-proc) as gtest behavioral tests — **v0.1 gate**
+- [ ] M9 in-process benchmark layer (`bench/`: per-verb micro + hop-path; JSON report, CI artifact)
+- [ ] M1, M2, M3, M5, M6(in-proc), M7(in-proc) + M9(in-proc) — **v0.1 gate**
 
 ## P1 — iceoryx2 backend (inter-process)
 
 - [ ] version pin + churn-absorption policy (ADR 0006 open question 1)
 - [ ] M1/M2/M3 cross-process, M4 crash recovery, M6 two-process leg
+- [ ] M9 backend layer: wrapper-overhead A/B vs raw iceoryx2, budget pinned + CI-gated
+- [ ] M10 introspection: shared-memory health segment + CLI tool (list/watch topics, rates, drops, staleness)
 
 ## P2 — Zenoh backend (inter-host)
 

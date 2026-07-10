@@ -20,6 +20,8 @@ Key contracts (see [docs/design.md](docs/design.md)):
 - **Envelope** — every message carries the xmBase telemetry context; cross-process traces are a transport property.
 - **Explicit back-pressure** — `Publish` returns a status; drops are counted, never silent.
 - **Backend seam** — engines behind CMake options, all default-off; the in-process reach never costs a dependency.
+- **Thin by measurement** — wrapper overhead vs the raw engines is benchmarked and CI-gated, with a native escape hatch for anything the portable surface doesn't cover; reference numbers ship with every release.
+- **Introspectable** — transport health (topics, rates, drops, staleness) is readable from outside the process at runtime via a CLI tool, with zero application cooperation.
 
 Per [ADR 0005](https://github.com/rxdu/xmotion/blob/main/docs/adr/0005-application-level-composition.md), algorithm and hardware components never link this library — only applications do.
 
