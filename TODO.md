@@ -5,10 +5,10 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 ## P0.0 — wish-code (the API spec)
 
 - [x] M1 planner→control wish-code (`test/scenarios/m1_planning_control_loop.cpp`) — consumer call-site decided (Sample + tri-state freshness; deltas D1–D5)
-- [ ] M2 mid-run join wish-code
-- [ ] M3 back-pressure wish-code
-- [ ] M5 request/response wish-code
-- [ ] M6 reach-parametric fixture wish-code (the factory that makes M1 run on all reaches)
+- [x] M2 mid-run join wish-code (deltas D6-D7: warm-start intrinsic to latest-only, RAII lifecycle)
+- [x] M3 back-pressure wish-code (deltas D8-D9: never-blocking Publish, per-subscriber drops, queryable counters)
+- [x] M5 request/response wish-code (deltas D10-D11: threadless take/reply server, non-defaultable deadline)
+- [x] M6 reach-parametric fixture wish-code (delta D12: per-backend Domain factories, Supports() matrix query, age_class)
 - [ ] M7 trace-continuity wish-code
 - [ ] Record API deltas in scenarios.md; freeze P0a header design from them
 
