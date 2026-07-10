@@ -4,7 +4,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P0.0 — wish-code (the API spec)
 
-- [~] M1 planner→control wish-code (`test/scenarios/m1_planning_control_loop.cpp`) — consumer call-site pending (user design input: take shape, staleness surface, degradation hook)
+- [x] M1 planner→control wish-code (`test/scenarios/m1_planning_control_loop.cpp`) — consumer call-site decided (Sample + tri-state freshness; deltas D1–D5)
 - [ ] M2 mid-run join wish-code
 - [ ] M3 back-pressure wish-code
 - [ ] M5 request/response wish-code

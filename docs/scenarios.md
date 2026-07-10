@@ -193,7 +193,12 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 
 ## API deltas discovered by the wish-code
 
-Recorded as the wish-code is written; each delta feeds the P0a API design. (None yet — P0.0 starts now.)
+Recorded as the wish-code is written; each delta feeds the P0a API design.
 
 | # | Discovered in | Delta |
 |---|---------------|-------|
+| D1 | M1 consumer | `TakeLatest()` returns `Sample<T>` (value + monotonic stamp + freshness verdict) — never an optional. Emptiness is a freshness state, not a different return type, so the call-site can't skip handling it. |
+| D2 | M1 consumer | `Freshness` is tri-state: `kFresh` / `kStale` (exists, past the wiring-time deadline — value still accessible) / `kNone` (never received). The library judges it against the declared deadline; callers can still read `age()` for custom logic. Dereferencing a `kNone` sample is a contract violation (debug-assert). |
+| D3 | M1 consumer | One deadline declaration, two surfaces: the per-take verdict at the call-site and a `messaging.*` deadline-miss event on the Fresh→Stale transition. They must agree by construction (same config, same clock). |
+| D4 | M1 consumer | Consumer-side zero-copy `View()` (variant B) **declined for now**: no current payload justifies imposing a hold-time contract on the hottest loop, and the POD copy is measurable in M9 if that ever changes. Revisit when a payload size demands it. |
+| D5 | M1 consumer | Bounded-wait `WaitFor()` (variant C) excluded from the paced-loop pattern — the loop owns its cadence, never the transport. May return later as a separate verb for event-driven (non-loop) consumers; that consumer would be its own scenario. |
