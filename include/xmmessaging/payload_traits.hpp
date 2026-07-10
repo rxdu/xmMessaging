@@ -25,7 +25,9 @@ inline constexpr bool is_payload_v =
 
 // Zero-copy path (QoS knob "Loan", M6-A4): the payload is constructed in
 // transport memory and read in place, so it must be trivially copyable.
-// Asserted at Publisher<T>::Loan() use (Loan<T> instantiation).
+// Asserted at Publisher<T>::Loan() use (the minting verb — deliberately not
+// at Loan<T> class scope, so Publish overload resolution can complete the
+// type for non-trivially-copyable payloads).
 template <typename T>
 inline constexpr bool is_zero_copy_payload_v = std::is_trivially_copyable_v<T>;
 

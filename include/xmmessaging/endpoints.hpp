@@ -29,6 +29,9 @@ class Domain;
 
 namespace detail {
 class EndpointImpl;
+struct EndpointAccess;  // P0b: introspect/test seam over the impl pointer
+template <typename T>
+class LoanPool;  // P0b: publisher-side loan cell pool (detail/in_process.hpp)
 }  // namespace detail
 
 // Common endpoint surface: the D16 readiness knobs and the R3 escape hatch.
@@ -48,6 +51,8 @@ class Endpoint {
   void* Native() noexcept;
 
  protected:
+  friend struct detail::EndpointAccess;  // P0b: introspect (D9) reads impl_
+
   Endpoint() noexcept;
   ~Endpoint();
   Endpoint(Endpoint&& other) noexcept;
@@ -66,9 +71,12 @@ template <typename T>
 class Loan {
  public:
   // M6-A4: the zero-copy path is a compile-time fact at the wiring site.
-  static_assert(is_zero_copy_payload_v<T>,
-                "xmMessaging: Loan (zero-copy publication) requires a "
-                "trivially-copyable payload (design.md QoS 'Loan', M6-A4)");
+  // The static_assert lives in Publisher<T>::Loan() — the only place a
+  // Loan is minted — NOT at class scope: overload resolution of
+  // Publisher::Publish(...) must be able to complete this type for any
+  // payload without tripping the zero-copy requirement (P0b fix; a
+  // class-scope assert made Publish(braced-init) ill-formed for every
+  // non-trivially-copyable payload).
 
   Loan(Loan&& other) noexcept;
   Loan& operator=(Loan&& other) noexcept;
@@ -101,6 +109,9 @@ class Loan {
 
   T* slot_ = nullptr;
   LoanStatus status_ = LoanStatus::kExhausted;
+  // P0b: owning pool, so an unpublished loan can return its cell at scope
+  // exit without a lookup (RAII contract above).
+  detail::LoanPool<T>* pool_ = nullptr;
 };
 
 // The write end of a topic. Minted by Domain::Advertise (D18: check
@@ -142,6 +153,10 @@ class Publisher : public Endpoint {
   template <typename... Upstream>
   PublishStatus PublishDerived(::xmotion::messaging::Loan<T>&& loan,
                                const Sample<Upstream>&... upstream);
+
+ private:
+  friend class Domain;  // publishers are minted by Domain::Advertise only
+  Publisher() noexcept = default;
 };
 
 // The read end of a topic. Each subscriber owns an independent mailbox or
@@ -170,6 +185,10 @@ class Subscriber : public Endpoint {
   // the queue is empty. Never blocks (D5: the loop owns its cadence — no
   // blocking wait verb on the paced-consumer surface).
   Sample<T> TryTake();
+
+ private:
+  friend class Domain;  // subscribers are minted by Domain::Subscribe only
+  Subscriber() noexcept = default;
 };
 
 // The request as taken by a server (D10): reuses the D1/D2 Sample surface —
@@ -241,6 +260,10 @@ class Server : public Endpoint {
   // sleeps blind. Returns when work arrives, shutdown begins, or max_park
   // elapses, whichever is first; true iff work is pending.
   bool WaitForWorkOrShutdown(Duration max_park);
+
+ private:
+  friend class Domain;  // servers are minted by Domain::Serve only
+  Server() noexcept = default;
 };
 
 // The call result (D11): status + value, mirroring Sample<T>; the value is
@@ -290,6 +313,10 @@ class Client : public Endpoint {
   // late reply is discarded by correlation (M5-A2/A3). The request rides
   // with the calling thread's telemetry context (D13/M5-A1).
   Result<Rsp> Call(const Req& request, Duration deadline);
+
+ private:
+  friend class Domain;  // clients are minted by Domain::Client only
+  Client() noexcept = default;
 };
 
 // D9: endpoint counters are programmatically queryable, in addition to the

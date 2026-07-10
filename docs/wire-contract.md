@@ -309,7 +309,7 @@ Common labels on every instrument: `topic` (string, §6.1 grammar), `endpoint_id
 | `drop_count` | counter | 1 | best-effort overflow drops (never silent) |
 | `overwrite_count` | counter | 1 | latest-only values overwritten unread |
 | `take_age_us` | histogram | microseconds | age of value at take (`take time − publish_stamp`) |
-| `deadline_miss_count` | counter | 1 | takes/polls observing the deadline passed |
+| `deadline_miss_count` | counter | 1 | Fresh→Stale transitions — one event per miss (D3), not per-take observations (which would scale with poll rate) |
 | `queue_depth` | gauge | 1 | current queued values (`queue<N>` history) |
 
 **Per hop** — emitted only where both ends share a clock (same host, or a declared ClockDomain — R8):

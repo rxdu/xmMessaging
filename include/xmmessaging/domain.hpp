@@ -148,3 +148,10 @@ class Domain {
 
 }  // namespace messaging
 }  // namespace xmotion
+
+// P0b: the in-process reach implementation — definitions of the template
+// members declared above (Advertise/Subscribe, the endpoint verbs, the
+// introspect counters). Included last because it needs the Domain and
+// endpoint declarations complete. Applications keep including only
+// messaging.hpp; this is not an API surface.
+#include "xmmessaging/detail/in_process.hpp"

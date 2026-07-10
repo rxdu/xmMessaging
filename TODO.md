@@ -24,11 +24,13 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P0b — in-process reach behavioral
 
-- [ ] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter) — parameterized over placement (heap vs shared mapping) + waiter (condvar vs futex) from day one, so the POSIX shm backend reuses it unchanged
-- [ ] queue<N> + reliability policies
-- [ ] `messaging.*` self-instrumentation
+- [x] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter) — parameterized over placement (heap vs shared mapping) + waiter (condvar vs futex) from day one, so the POSIX shm backend reuses it unchanged (`detail/latest_slot.hpp`; TSan-clean seqlock)
+- [x] queue<N> + reliability policies (`detail/bounded_queue.hpp`: SPSC lock-free; shared-ownership publishers mutex-serialized — lock-free MPMC is a P1 item)
+- [~] `messaging.*` self-instrumentation — D9 introspect counters always-on; R11 §7 instruments emitted via the xmBase telemetry API (counters, take_age histogram, gauges); hop_latency histogram + label plumbing + M13-A4 capture verification remain (P0b part 2)
 - [ ] M9 in-process benchmark layer (`bench/`: per-verb micro + hop-path; JSON report, CI artifact)
-- [ ] M1, M2, M3, M5, M6(in-proc), M7(in-proc), M13(in-proc), M14(in-proc) + M9(in-proc) — **v0.1 gate**
+- [~] M1, M2, M3, M5, M6(in-proc), M7(in-proc), M13(in-proc), M14(in-proc) + M9(in-proc) — **v0.1 gate** — M1/M2/M3/M14 behavioral tests pass (plain + TSan, `test/behavioral/`); M5 (Server/Client verbs), M6/M7/M13 tests are P0b part 2
+- [ ] R6 schema hash: replace the interim typeid-based description (`detail/schema_hash.hpp`) with the wire-contract §4.2 canonical form + V1–V6 vectors before any hash crosses a process boundary (P1)
+- [ ] aarch64 leg of the behavioral suite (R1: seqlock memory ordering must be validated on the weaker memory model in CI)
 
 ## P1 — iceoryx2 backend (inter-process)
 

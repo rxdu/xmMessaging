@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 project(xmMessaging VERSION 0.0.1 LANGUAGES CXX)
 
-# P0a: the API headers exist (include/xmmessaging/, derived from the D1-D18
-# deltas in docs/scenarios.md) and the wish-code scenario suite compiles
-# against them as an OBJECT library — compile-only, no linking, so the
-# declared-but-undefined API is exercised exactly as far as P0a promises.
-# Behavior (the in-process reach) arrives at P0b.
+# P0b (part 1): the in-process reach is real — xmmessaging is a compiled
+# STATIC library (seqlock LatestSlot, SPSC BoundedQueue, typed Domain
+# registry; see include/xmmessaging/detail/ and src/), and the behavioral
+# suite (test/behavioral/, gated by BUILD_TESTING) asserts the M1/M2/M3/M14
+# acceptance criteria from docs/scenarios.md. The wish-code scenario suite
+# still compiles UNMODIFIED as an OBJECT library (it is the API spec).
 option(BUILD_TESTING "Build tests" OFF)
 option(XMMESSAGING_BUILD_SCENARIOS "Build the scenario acceptance suite" ON)
 # Backend seam (ADR 0006 / ADR 0004 pattern): one option per engine. The
@@ -20,6 +21,22 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+## Sanitizer builds (M1-A2 requires the behavioral suite TSan-clean).
+## Applied globally — including vendored xmBase and googletest — because a
+## TSan process must have every synchronization site instrumented or the
+## race detector reports false positives on the seam.
+set(XMMESSAGING_SANITIZE "" CACHE STRING
+    "Build everything with a sanitizer: '' (off), 'thread', or 'address'")
+if (XMMESSAGING_SANITIZE STREQUAL "thread")
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=thread)
+elseif (XMMESSAGING_SANITIZE STREQUAL "address")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address)
+elseif (NOT XMMESSAGING_SANITIZE STREQUAL "")
+  message(FATAL_ERROR "xmMessaging: unknown XMMESSAGING_SANITIZE value '${XMMESSAGING_SANITIZE}'")
+endif ()
 
 include(GNUInstallDirs)
 
@@ -46,15 +63,19 @@ if (NOT TARGET xmotion::xmBase)
   endif ()
 endif ()
 
-## The portable API surface. INTERFACE (header-only) at P0a: every verb is
-## declared, nothing is defined; the in-process reach turns this into a
-## compiled library at P0b.
-add_library(xmmessaging INTERFACE)
-target_include_directories(xmmessaging INTERFACE
+find_package(Threads REQUIRED)
+
+## The portable API surface + the in-process reach (P0b): a compiled STATIC
+## library. Templates (the typed verbs) live in the headers; the non-template
+## core (Domain lifecycle, registry, Endpoint base) is compiled here.
+add_library(xmmessaging STATIC
+    src/domain.cpp)
+target_include_directories(xmmessaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_link_libraries(xmmessaging INTERFACE xmotion::xmBase)
-target_compile_features(xmmessaging INTERFACE cxx_std_17)
+target_link_libraries(xmmessaging PUBLIC xmotion::xmBase Threads::Threads)
+target_compile_features(xmmessaging PUBLIC cxx_std_17)
+target_compile_options(xmmessaging PRIVATE -Wall -Wextra)
 add_library(xmotion::xmmessaging ALIAS xmmessaging)
 
 ## Backend seam status (engines arrive at P1/P1b/P2; the options exist now so
@@ -107,4 +128,28 @@ if (XMMESSAGING_BUILD_SCENARIOS)
       PROPERTIES COMPILE_OPTIONS -Wno-return-type)
 endif ()
 
-message(STATUS "xmMessaging: P0a — API headers + compile-only scenario suite; see docs/scenarios.md")
+if (BUILD_TESTING)
+  enable_testing()
+  ## googletest: same family pattern as xmTelemetry (third_party submodule,
+  ## pinned at v1.14.0). Until the submodule is added to this repo, fall
+  ## back to FetchContent of the same pinned release. xmBase may already
+  ## have brought a gtest target in via its own third_party.
+  if (NOT TARGET gtest)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt)
+      add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
+    else ()
+      message(STATUS "xmMessaging: third_party/googletest not present — fetching pinned v1.14.0")
+      include(FetchContent)
+      FetchContent_Declare(googletest
+          URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+          URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+          DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+      FetchContent_MakeAvailable(googletest)
+    endif ()
+  endif ()
+  add_subdirectory(test/behavioral)
+endif ()
+
+message(STATUS "xmMessaging: P0b — in-process reach + behavioral suite (BUILD_TESTING); see docs/scenarios.md")
