@@ -65,32 +65,41 @@ int main() {
   });
 
   // -- Consumer: control loop at 1 kHz --------------------------------------
+  // Call-site shape decided 2026-07-10 (variant A of three candidates; see
+  // API deltas D1-D5 in docs/scenarios.md for what this commits the API to
+  // and which alternatives were declined).
   std::thread control([&] {
+    Setpoint setpoint = SafeStop();
     while (running) {
-      // =======================================================================
-      // TODO(user contribution): the consume call-site — the single most
-      // API-shaping decision in this suite. Write the ~5-10 lines you WISH
-      // the 1 kHz loop could be, answering three questions the design doc
-      // deliberately leaves to wish-code:
-      //
-      //   1. Take shape: does the loop poll a snapshot
-      //      (`auto v = sub.TakeLatest()` returning an optional-like stamped
-      //      value), hold a zero-copy view that must be released, or block
-      //      with a bound (`sub.WaitFor(cycle_budget)`)? Remember M1-A4:
-      //      no allocation, no unbounded blocking on this path.
-      //   2. Staleness surface: given deadline=250ms was declared at wiring,
-      //      how does this call-site *read* it — a flag on the taken value
-      //      (`v.deadline_missed()`), a distinct return state, or an age you
-      //      compare yourself (`v.age() > kPlanDeadline`)?
-      //   3. Degradation policy: on stale/missing plan, what does the loop
-      //      do — hold last setpoint, command zero, or escalate? (This line
-      //      is robot policy, but WHERE it hooks in shapes the API.)
-      //
-      // The M1 acceptance criteria (A1-A4) must be assertable against
-      // whatever you write here.
-      // =======================================================================
-
-      SpinUntilNextCycle();  // 1 kHz pacing, fake
+      // TakeLatest() is wait-free and allocation-free (R7). It always
+      // returns a Sample<TrajectoryHead>: value + monotonic stamp + a
+      // tri-state freshness verdict judged by the library against the
+      // deadline declared at wiring (R8) — emptiness and staleness are
+      // states of the sample, not different return types.
+      auto plan = sub.TakeLatest();
+      switch (plan.freshness()) {
+        case msg::Freshness::kFresh:
+          // Newest value, within deadline. plan.age() available for
+          // prediction/interpolation along the plan.
+          setpoint = TrackPlan(*plan, plan.age());
+          break;
+        case msg::Freshness::kStale:
+          // A value exists but exceeded the 250 ms deadline. The policy
+          // line is robot-specific and deliberately lives here in app
+          // code — the API's job was only to make this state impossible
+          // to confuse with the other two. The Fresh->Stale transition
+          // also fires a messaging.* deadline-miss event (M1-A3).
+          setpoint = DecayToStop(setpoint);
+          break;
+        case msg::Freshness::kNone:
+          // Nothing ever received (startup / planner never came up).
+          // Distinct from kStale: "never had a plan" and "lost the
+          // planner" are different incidents with different responses.
+          setpoint = SafeStop();
+          break;
+      }
+      Apply(setpoint);
+      SpinUntilNextCycle();  // 1 kHz pacing stays with the loop, never the transport
     }
   });
 
