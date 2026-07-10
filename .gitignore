@@ -1,0 +1,14 @@
+# build
+build*/
+cmake-build-*/
+
+# editor / temp
+*~
+*.swp
+.DS_Store
+.idea/
+.vscode/
+.cache/
+
+# log
+*.log
