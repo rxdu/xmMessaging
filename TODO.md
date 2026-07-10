@@ -15,6 +15,8 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 ## P0a — API headers + in-process reach skeleton
 
 - [ ] `include/xmmessaging/` API tier (Domain, Advertise/Subscribe, QoS vocabulary, statuses)
+- [ ] schema-hash mechanism (R6): compile-time layout hash + endpoint match slot — designed before the API freezes
+- [ ] per-reach support matrix representation (R3): queryable at wiring time
 - [ ] xmBase dependency resolution (in-tree > installed > bundled submodule, xmTelemetry pattern)
 - [ ] M8 lib-only link test (zero transport deps by default)
 
@@ -32,14 +34,18 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] M1/M2/M3 cross-process, M4 crash recovery, M6 two-process leg
 - [ ] M9 backend layer: wrapper-overhead A/B vs raw iceoryx2, budget pinned + CI-gated
 - [ ] M10 introspection: shared-memory health segment + CLI tool (list/watch topics, rates, drops, staleness)
+- [ ] M11 type-skew refusal (R6): three skew cases + cross-build hash determinism
 
 ## P2 — Zenoh backend (inter-host)
 
 - [ ] Zenoh scope decision: network-only vs intra-host fallback (ADR 0006 open question 2)
 - [ ] M6 two-host leg (CI: containers/netns); latency envelopes become regression bounds
+- [ ] M6-A5 clock semantics (R8): advisory age vs declared synced-clock domain
+- [ ] threat model doc (R9): trusted-LAN assumption + revisit trigger — ships with the first Zenoh-backed release
 
 ## Meta
 
+- [ ] CI baselines: x86_64 + aarch64 (R1); quickstart time-to-first-message check (R1)
 - [ ] Umbrella: `components/messaging` submodule + `XMOTION_WITH_MESSAGING` (default OFF)
 - [ ] Migrate wire-vocabulary homes here as they materialize (`ros2_idl` remnants)
 - [ ] ADR 0006: propose Proposed → Accepted once the P0b gate passes

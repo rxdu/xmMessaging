@@ -36,6 +36,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 | M8 | Lib-only build / backend optionality | `test/scenarios/m8_libonly_build.cpp` + link test | in-proc reach with zero transport deps (R1) | in-process | P0a |
 | M9 | Benchmark suite & wrapper-overhead budget | `bench/` | thin wrapper, measured (R3, R4) | all three | P0b (in-proc), grows with backends |
 | M10 | External introspection | `test/scenarios/m10_introspection.cpp` + CLI | outside-the-process diagnostics (R5) | inter-process | P1 |
+| M11 | Rebuild skew: type-identity refusal | `test/scenarios/m11_type_skew.cpp` | schema-hash match gate (R6) | inter-process | P1 |
 
 ---
 
@@ -110,6 +111,8 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A2: the LatestMailbox contract (M1 A1–A3) holds on every reach.
 - A3: measured hop latency fits each reach's published envelope (recorded, not gated at first; becomes a regression bound at P2).
 - A4: a payload type lacking what a reach requires (e.g. not trivially copyable on the zero-copy path, no serializer for network) is a **compile-time** error at wiring, not a runtime failure.
+- A5 *(R8)*: on the two-host leg without a declared synchronized-clock domain, taken values expose age as *advisory* (distinctly typed/flagged from same-host age) and no deadline verdict is issued; with the domain declared, deadline semantics apply and the declaration is visible in introspection.
+- A6 *(R3 divergence-over-emulation)*: any contract a reach does not natively support is reported at wiring time via the support matrix — the scenario asserts the query result matches the documented matrix, and no silent emulation kicks in.
 
 ## M7 — Trace continuity across the hop
 
@@ -137,10 +140,10 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 
 **Purpose.** R3 and R4 made falsifiable: "thin" and "fast" are measured claims, and a user must be able to reproduce the measurement on their own hardware with one command.
 
-**Setup.** `bench/` tier (google-benchmark), two layers. *Micro*: per-verb cost — `Publish`, `Loan`+`Publish`, take — on the in-process reach, and the same verbs through each backend **paired with the identical operation on the raw backend API**, so wrapper overhead is a direct A/B. *Path*: end-to-end hop latency percentiles (p50/p99/max), throughput, and jitter per reach, swept across payload sizes ({64 B, 1 KiB, 64 KiB, 1 MiB}) and the M1 rate profile.
+**Setup.** `bench/` tier (google-benchmark), three layers. *Micro*: per-verb cost — `Publish`, `Loan`+`Publish`, take — on the in-process reach, and the same verbs through each backend **paired with the identical operation on the raw backend API**, so wrapper overhead is a direct A/B. *Path*: end-to-end hop latency percentiles (p50/p99/p99.9/max), throughput, and jitter per reach, swept across payload sizes ({64 B, 1 KiB, 64 KiB, 1 MiB}) and the M1 rate profile. *System (R4)*: the robot-typical profile — ~30 topics at mixed 10 Hz–1 kHz rates, small payloads, concurrent — because single-topic sweeps flatter every transport.
 
 **Acceptance criteria.**
-- A1: one command (`ctest` label or `scripts/bench.sh`) runs the full suite and emits a machine-readable report (JSON) plus a human summary.
+- A1: one command (`ctest` label or `scripts/bench.sh`) runs the full suite and emits a machine-readable report (JSON) plus a human summary; the report embeds the hardware context (CPU model, governor, kernel + RT patch, isolation, load state) — a context-less report is a failing run.
 - A2: wrapper overhead per verb vs the raw backend stays within a pinned budget (target set at P1 calibration; the point is the *gate exists*, per-verb, in CI).
 - A3: in-process publish and take are allocation-free and lock-free, proven by probe, at every payload size in the sweep.
 - A4: results are published as CI artifacts per release, and the README table of reference numbers is generated from them — never hand-written.
@@ -158,6 +161,19 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A3: each injected fault is diagnosable from the CLI output alone (staleness rises; drops count up; the dead endpoint is marked, not vanished silently).
 - A4: attaching/detaching the observer is invisible to the observed processes' latency profile (measured against an M9 baseline run).
 - A5: reading the segment is safe against a concurrently crashing publisher — the observer never blocks, crashes, or reads torn counters.
+
+## M11 — Rebuild skew: type-identity refusal
+
+**Purpose.** R6 as a test: the field incident where two processes built from different commits disagree about a payload's layout must be impossible to hit silently.
+
+**Setup.** Two builds of the M1 planner/control pair from deliberately divergent payload definitions, three skew cases: a field appended (size change), two fields reordered (same size, different layout — the nasty one), a field's type changed at same offset/size. Also the control case: identical layouts built separately.
+
+**Acceptance criteria.**
+- A1: in all three skew cases, the endpoint match is refused with the distinct type-mismatch status — the subscriber never receives a single reinterpreted byte.
+- A2: the reorder case (identical `sizeof`, identical type name) is caught — proving the hash covers layout, not just name and size.
+- A3: the refusal is visible in introspection (M10 tooling): both endpoints listed, marked incompatible, with both schema hashes shown.
+- A4: the control case matches — separately-built identical layouts produce identical hashes (hash is deterministic across builds, not a build fingerprint).
+- A5: the refusal is local — other topics between the same two processes keep flowing.
 
 ---
 
