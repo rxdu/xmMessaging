@@ -38,8 +38,8 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [ ] version pin + churn-absorption policy (ADR 0006 open question 1)
 - [ ] M1/M2/M3 cross-process, M4 crash recovery, M6 two-process leg
 - [ ] M9 backend layer: wrapper-overhead A/B vs raw iceoryx2, budget pinned + CI-gated
-- [ ] M10 introspection: shared-memory health segment + CLI tool (list/watch topics, rates, drops, staleness)
-- [ ] M11 type-skew refusal (R6): three skew cases + cross-build hash determinism
+- [x] M10 introspection — **landed against the POSIX-shm backend** (P1b introspection follow-up): read-only reader library (`detail/introspect_reader.hpp`), `xmmsg` CLI (`tools/xmmsg`: list/stat/watch/clean, `--json`), `m10_behavioral_test` A1–A5 incl. CLI-subprocess assertions + latency-invisibility A/B; iceoryx2 gains its own introspection story at P1
+- [x] M11 type-skew refusal (R6) — **landed against the POSIX-shm backend**: three skew cases + reorder + cross-build determinism via four separately compiled helper builds (`m11_helper_v0..3`), refusal recorded in the segment header (both hashes) and rendered by `xmmsg stat`; re-verify per-backend when iceoryx2 lands
 - [ ] M12 foreign-language participant (R10): Python via native backend binding + spec only — lands with the first backend whose Python binding is mature (Zenoh likely first)
 - [ ] binding ladder (R10, on consumer demand): Python -> Go (via C ABI/cgo; no RT guarantees at call site) -> Rust (likely spec-only, native crates)
 
@@ -50,7 +50,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [x] support matrix queryable via `Supports()`, asserted by M6-A6: latest-only, best-effort queue (depth ≤ 16), warm start, deadline = yes; reliable queue, zero-copy loan, req/resp, shared ownership = declared divergences refused at wiring (wire-contract §6.3/§6.4)
 - [x] M1/M2/M3/M6 cross-process legs runnable without iceoryx2 (fork+exec `shm_test_helper`) + M4 crash cases (SIGKILL mid-stream: no torn/blocked reads, staleness rises; restart re-advertises + rejoins; MatchedCount observes death/rejoin; ordinal continuity across restart) — plain + TSan + ASan suites green (TSan cross-process blindness documented in `shm_test_support.hpp`)
 - [x] R6 canonical schema hash for cross-process matching: `XMMSG_DESCRIBE` opt-in generates the wire-contract §4.2 description at wiring time, §5 vectors V1–V6 verified (`wire_schema_test`); undescribed types keep the interim typeid hash — documented divergence (§6.4): not foreign-computable, misses the M11-A2 reorder
-- [ ] share the shm substrate with the R5 introspection segment (the per-topic header is designed to extend; introspection segment layout + ClockDomain encoding + `xmmsg` CLI = the P1b introspection follow-up)
+- [x] share the shm substrate with the R5 introspection surface — resolved as designed: no separate segment, the per-topic header (layout v2: + refusal-visibility record) IS the surface; discovery = /dev/shm scan + §6.4 grammar; read protocol + header byte layout normative in wire-contract §8; `xmmsg` CLI ships (`XMMESSAGING_BUILD_TOOLS`, default ON); ClockDomain encoding deferred to P2 (same-host backend has one clock — §8.5)
 - [ ] align the segment's per-record bytes with the §2 64-byte envelope frame before M12 targets this backend (recorded divergence, wire-contract §6.4)
 - [ ] reliable queue over shm (cross-ring all-or-nothing pre-check) — implement or declare permanent at P1
 - [ ] distinct wiring status for "contract unsupported on this reach" vs "backend not built" (both read kUnsupportedReach today) — P1 API decision

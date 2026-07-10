@@ -31,6 +31,7 @@ Per [ADR 0005](https://github.com/rxdu/xmotion/blob/main/docs/adr/0005-applicati
 - [docs/design.md](docs/design.md) — library design (contracts, QoS vocabulary, reach model)
 - [docs/scenarios.md](docs/scenarios.md) — the scenario suite: the executable specification the API is built to satisfy
 - `test/scenarios/` — wish-code (P0.0), later the behavioral acceptance tests
+- `tools/xmmsg/` — the `xmmsg` introspection CLI (R5): `list` / `stat` / `watch` live topics — type hash, QoS, pids, counters, last-publish age — from outside the observed processes, plus `clean` for explicit segment reclaim; `--json` for machine consumption
 
 ## Part of XMotion
 

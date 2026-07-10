@@ -17,7 +17,7 @@ The spec covers five artifact groups:
 2. The **payload layout rules** (§3) — what a cross-language payload type is allowed to look like.
 3. The **schema-hash algorithm** (§4, vectors in §5) — the R6 type-identity gate, computable without a C++ compiler.
 4. **Topic naming and per-backend QoS mappings** (§6).
-5. The **standard metric schema** (§7) and the **introspection segment** (§8).
+5. The **standard metric schema** (§7) and the **introspection surface** (§8).
 
 The **network serialization format** for the inter-host reach (xmBase serialization of payloads over Zenoh) is in scope for this spec but its section is deferred to P2, when the Zenoh backend is integrated. **TBD (P2).**
 
@@ -49,7 +49,7 @@ Total envelope size: **64 bytes** (one cache line on the tested baselines). The 
 
 **Telemetry context (offsets 0x08–0x1F).** These 24 bytes are exactly the xmBase telemetry `Inject`/`Extract` byte envelope (`xmbase/telemetry/context.hpp`, `kContextWireSize = 24`, layout `trace.hi | trace.lo | span.value`). An all-zero trace id (both `trace_id_hi` and `trace_id_lo` zero) means "no active trace" and MUST be preserved as zero, not invented. *Note:* xmBase `Inject` writes host byte order; this spec fixes little-endian. On the family's tested baselines (x86_64, aarch64 Linux) these coincide byte-for-byte; a big-endian port would require xmBase to fix its `Inject` order first. **Recorded as a known coupling, not a TBD.**
 
-**Clock rule (R8).** `publish_stamp` and `origin_stamp` are **per-host monotonic** (`CLOCK_MONOTONIC`, shared with xmBase telemetry — one timeline by construction). Same-host readers MAY compute ages and enforce deadlines from them directly. A cross-host reader MUST treat differences against its own clock as **advisory** unless the domain declares a synchronized-clock domain (PTP/NTP) in its `Domain` configuration; that declaration is recorded in the domain's introspection home segment (§8) and in introspection output, so post-hoc analysis knows what the numbers meant. The `ClockDomain` declaration's encoding lives with the introspection segment layout. **TBD (P1b).**
+**Clock rule (R8).** `publish_stamp` and `origin_stamp` are **per-host monotonic** (`CLOCK_MONOTONIC`, shared with xmBase telemetry — one timeline by construction). Same-host readers MAY compute ages and enforce deadlines from them directly. A cross-host reader MUST treat differences against its own clock as **advisory** unless the domain declares a synchronized-clock domain (PTP/NTP) in its `Domain` configuration; that declaration is recorded in the domain's introspection surface (§8) and in introspection output, so post-hoc analysis knows what the numbers meant. The `ClockDomain` declaration's encoding lands with the first cross-host backend (§8.5). **TBD (P2).**
 
 ## 3. Payload layout rules
 
@@ -316,7 +316,7 @@ where `<isolation-key>` is §6.2 and `<sanitized-topic>` applies §6.2's sanitiz
 
 **Segment record layout — recorded divergence (P1b).** The segment's mail records carry the §2 envelope *fields* in a segment-local 48-byte packed form (context 24 B @0, publish stamp i64 @24, origin stamp i64 @32, hop count u32 @40, flags u32 @44) followed by a u64 transport ordinal and the payload — not the §2 64-byte frame (no version byte / reserved regions inside each record; the header carries the envelope version once per segment). Both P1b participants are this library, and the header's version fields gate skew. Aligning per-record bytes to the §2 frame (or publishing this record layout as normative) is REQUIRED before a foreign participant (M12) targets this backend; tracked in Open items.
 
-**Lifecycle.** Segments are **never unlinked by the library** ("last detacher unlinks" is racy, and unlinking would destroy the warm-start value whose survival is the point). They are bounded by the domain's topic set, namespaced by the isolation key, and reclaimed explicitly: the `xmmsg` CLI (R5 follow-up) gets a cleanup verb; until then `rm /dev/shm/xmmsg.<key>.*` is the documented manual path.
+**Lifecycle.** Segments are **never unlinked by the library** ("last detacher unlinks" is racy, and unlinking would destroy the warm-start value whose survival is the point). They are bounded by the domain's topic set, namespaced by the isolation key, and reclaimed explicitly: `xmmsg clean` (R5 CLI, shipped with the P1b introspection follow-up) unlinks segments whose publisher and all subscribers are dead by pid probe — dry-run by default, `--yes` to unlink; `rm /dev/shm/xmmsg.<key>.*` remains the CLI-less manual path.
 
 **Schema-hash forms (library conformance note).** The C++ library computes the §4 canonical hash for payload types opted in via its `XMMSG_DESCRIBE` field-description macro (validated against the §5 vectors in-tree). Types that do not opt in fall back to an interim hash over the implementation's mangled type name + size + alignment, prefixed `xmmsg-interim-schema:` so the two forms can never collide. **Stated divergence:** the interim form is not computable by a foreign language and does not catch a same-name/same-size field reorder (M11-A2); payloads crossing a process boundary SHOULD be `XMMSG_DESCRIBE`d.
 
@@ -360,27 +360,105 @@ Common labels on every instrument: `topic` (string, §6.1 grammar), `endpoint_id
 
 Histogram bucket boundaries are chosen by the telemetry binding, not this spec; the instrument names, types, units, and label keys above are normative. Adding instruments is a spec **minor** version change; renaming or retyping one is **major**.
 
-## 8. Introspection segment
+## 8. Introspection surface (POSIX shm — resolved, P1b introspection follow-up)
 
-Placeholder — the byte layout is specified in the **P1b introspection follow-up** (**TBD**). The substrate landed with the POSIX-shm backend (§6.4): the per-topic segment header already carries the identity, liveness, and counter surface (single-writer atomic slots, refuse-unknown layout versioning) that an external observer needs, and was designed to be extended by this work. What is already normative:
+**Decision.** There is no separate introspection segment on the POSIX-shm backend: the per-topic transport segment header (§6.4) **is** the introspection surface — transport and introspection share the substrate by design (design.md R5), so the counters an observer reads are the very atomics the transport writes, and reconciliation with the endpoints' own `messaging.*` telemetry is exact by construction (M10-A2). This section is normative for **segment layout version 2**; an external observer implements it from this document alone. The reference consumers are `detail/introspect_reader.hpp` and the `xmmsg` CLI (`list` / `stat` / `watch` / `clean`), which ships with the library (R5). The CLI is live-state only — history is the telemetry plane's job, offline.
 
-- The segment is **named and versioned**: its name is derived from the domain isolation key (§6.2), and its first bytes carry a layout version that readers MUST check before interpreting anything else, with the same refuse-unknown rule as the envelope version byte.
-- It is readable by **any** process with no cooperation from the observed application (R5, M10-A1) — attaching and reading MUST be invisible to the observed processes' latency profile (M10-A4).
-- **Torn-read safety**: a reader never blocks and never observes a half-written record; the layout must make torn reads detectable and retryable (versioned/seqlock-style reads), since readers take no locks (M10-A5).
-- **Crash-of-writer safety**: a writer dying mid-update leaves a segment that readers can still traverse safely — a skippable in-progress record, never a poisoned lock. Lifecycle is daemonless; the kernel reclaims mappings when the last mapper exits.
-- **Single-writer-per-slot**: every slot in the segment has exactly one writing process/endpoint at any time; there is no cross-process mutual exclusion on the data path.
-- The domain's declared **ClockDomain** (R8) is recorded in the segment's home area, so external tooling and post-hoc analysis know whether cross-host stamps were synchronized. Encoding TBD with the layout.
+### 8.1 Discovery
+
+Discovery is a **directory scan** of the backend namespace (`/dev/shm` on Linux) against the §6.4 name grammar — daemonless: there is no registry process to ask and no query verb.
+
+- A name `xmmsg.<isolation-key>.<topic>` parses unambiguously: after the prefix, the first **two** dot-separated segments are the isolation key (§6.2 — the domain-name sanitizer never emits `.`), the remainder is the topic. The over-long fallback form `xmmsg.h` + 16 lowercase hex digits carries no parseable key/topic (§6.4) and is reported by object name.
+- A name match is a **candidate only**. Readers MUST validate per §8.2 before interpreting a single byte past the header's version fields; a foreign file that happens to match the glob MUST be skipped, never crashed on.
+
+### 8.2 Observer contract & validation
+
+- Observers MUST attach **read-only** (`shm_open` `O_RDONLY`, `mmap` `PROT_READ`). Every field of this protocol is readable without write access, so a conforming observer is *physically unable* to perturb transport state — observer invisibility (M10-A4) is enforced by the kernel, not by politeness. (Participants — the library's own wiring paths — do write: slot claims, the refusal record. Those are not observers.)
+- Validation order (normative): (1) object size ≥ header size, else **not ready**; (2) `init_state` == 1 (acquire load), else **not ready** — before the creator's release store the identity fields are meaningless zeros; (3) `magic`, else **foreign**; (4) `layout_version` and `envelope_version` known, else **refuse** (the envelope version byte's refuse-unknown rule); (5) header `total_size` == actual object size, else **foreign**.
+- Identity fields (offsets 0–63) are **init-once**: written by the creator before `init_state`'s release store, plain reads afterwards. All mutable fields are lock-free atomics: load each with a relaxed (liveness/ordering-insensitive) or acquire (`init_state`, `pub_pid`, `refusal_count`) load. Counters are monotonic and individually exact; the *set* is not mutually snapshotted — there is no cross-field consistency guarantee and MUST NOT need to be one.
+- Liveness is a `kill(pid, 0)` probe (`ESRCH` ⇒ dead). The recycled-pid limit of §6.4 applies to observers identically: a recycled pid reads as alive; the consequence is a conservative diagnosis, never corruption.
+- **Torn-read / crash-of-writer safety** (M10-A5): the only multi-word read is the master-slot envelope (§8.4), protected by the writer-progress-only seqlock — a torn copy cannot validate, a writer SIGKILLed mid-store leaves a permanently odd sequence that the bounded retry budget detects. An observer never blocks, never takes a lock, and never spins unbounded.
+- **Single-writer-per-slot** holds for every transport field. The one stated exception is the refusal record (§8.3): a last-writer-wins advisory slot written by *refused attachers* on the wiring path — each field is a single atomic (untorn by construction), `refusal_count` is the reliable monotonic signal, the `refused_*` fields identify the most recent offender.
+
+### 8.3 Header layout (layout version 2)
+
+Little-endian, natural alignment; 1032 bytes total. "a" marks lock-free atomics. Offsets are normative for `layout_version` 2 (v1 lacked the refusal record; v1 readers refuse v2 and vice versa).
+
+| Offset | Size | Field | Semantics |
+|---|---|---|---|
+| 0 | 8 | `magic` | `0x31455347534D4D58` ("XMMSGSE1") |
+| 8 | 4 | `layout_version` | **2** — refuse-unknown |
+| 12 | 4 | `envelope_version` | §2 version carried once per segment |
+| 16 | 8 | `schema_hash` | the topic's established R6 identity (§4) |
+| 24 | 8 | `payload_size` | bytes |
+| 32 | 8 | `payload_align` | bytes |
+| 40 | 8 | `total_size` | full segment size — validated by every attacher and observer |
+| 48 | 4 | `max_subscribers` | 16 at v2 |
+| 52 | 4 | `ring_capacity` | 16 at v2 |
+| 56 | 4 | `creator_history_kind` | creator's declared QoS: 0 latest-only, 1 queue |
+| 60 | 4 | `creator_queue_depth` | declared depth (queue kind) |
+| 64 | 4a | `init_state` | creation barrier: 1 (release) = data plane ready |
+| 68 | 4a | `futex_word` | cross-process wake seam (unused by observers) |
+| 72 | 8a | `accepted_ordinal` | topic ordinal author; survives publisher crashes |
+| 80 | 4a | `pub_pid` | publisher liveness slot; 0 = none |
+| 84 | 4a | `pub_epoch` | publisher generation counter (M4-A4) |
+| 88 | 8a | `pub_publish_count` | cumulative accepted publishes (all generations) |
+| 96 | 8a | `pub_bytes` | cumulative payload bytes |
+| 104 | 8a | `refusal_count` | R6 refusals recorded on this topic; 0 = never |
+| 112 | 8a | `refused_schema_hash` | most recent refused endpoint's hash (M11-A3) |
+| 120 | 8a | `refused_payload_size` | its payload size |
+| 128 | 4a | `refused_pid` | its pid |
+| 132 | 4 | reserved | zero |
+| 136 | 896 | `sub_slots[16]` | 56 bytes each, layout below |
+
+Per-subscriber slot (56 bytes, offsets relative to the slot):
+
+| Offset | Size | Field | Semantics |
+|---|---|---|---|
+| +0 | 4a | `state` | 0 free, 1 claimed (mid-init), 2 active |
+| +4 | 4a | `pid` | owner, for liveness |
+| +8 | 4a | `history_kind` | 0 latest-only, 1 queue |
+| +12 | 4a | `queue_depth` | declared depth (queue kind) |
+| +16 | 8a | `last_consumed_ordinal` | `UINT64_MAX` = join baseline unset (D6) |
+| +24 | 8a | `take_count` | §7 `take_count` |
+| +32 | 8a | `drop_count` | §7 `drop_count` (publisher-counted, per-subscriber) |
+| +40 | 8a | `overwrite_count` | §7 `overwrite_count` |
+| +48 | 8a | `deadline_miss_count` | §7 `deadline_miss_count` |
+
+### 8.4 Last-publish age: the master-slot read
+
+The master latest-only slot (the §6.4 warm-start slot) doubles as the last-publish record. It sits at offset `align64(1032)` = **1088** and is a seqlock cell: one `u64` sequence word followed by `N` data words, `N = (48 + 8 + payload_size + 7) / 8` (envelope + ordinal + payload, §6.4 record layout). An observer needs only the **prefix**: words 0–5 are the 48-byte envelope (publish stamp `i64` at record byte 24 = word 3; origin stamp at byte 32 = word 4), word 6 is the transport ordinal. Reading a prefix under the seqlock is exactly as torn-proof as reading everything — validation is on the sequence, not the byte count.
+
+Normative read protocol (bounded seqlock read; same memory-ordering pairs as the transport's own reader):
+
+```
+for attempt in 0 ..= retry_budget:            # budget REQUIRED; 4096 recommended
+    s1 = load(seq, acquire)
+    if s1 == 0:            -> EMPTY           # never written (or crash-repaired)
+    if s1 is odd: continue                    # write in progress — retry
+    copy words[0..6] (relaxed loads)
+    fence(acquire)
+    if load(seq, relaxed) == s1: -> VALUE     # validated, untorn
+-> STALLED                                    # budget exhausted
+```
+
+- `EMPTY` and `STALLED` are honest answers, not errors: `STALLED` means the writer died mid-store (M4/M10-A5) or the read raced `retry_budget` consecutive overwrites — either way the observer reports "last publish unknown" and MUST NOT spin further or block.
+- **Age** = observer's own `CLOCK_MONOTONIC` now − `publish_stamp`. Same host, one clock (R8): the age is *measured*, never advisory, and needs no cooperation to compute.
+
+### 8.5 ClockDomain
+
+The R8 ClockDomain declaration does **not** live on this backend: POSIX shm is same-host by construction — one `CLOCK_MONOTONIC`, nothing to declare. The declaration's introspection-visible encoding lands with the first cross-host backend (Zenoh, P2). **TBD (P2).**
 
 ## Open items (consolidated)
 
 | Item | Section | Resolves |
 |---|---|---|
 | Network serialization format (inter-host payload encoding) | §1 | P2 |
-| ClockDomain declaration encoding | §2, §8 | P1b introspection follow-up (the per-topic segment landed first; ClockDomain rides in the introspection home segment) |
+| ClockDomain declaration encoding | §2, §8.5 | P2 (POSIX shm is same-host/single-clock; the declaration lands with the first cross-host backend) |
 | Maximum topic length | §6.1 | P1 (POSIX shm bounds the full object name at 240 bytes with a hashed fallback, §6.4) |
 | ~~Domain isolation key derivation algorithm~~ | §6.2 | **resolved (P1b)** |
 | iceoryx2 QoS mapping column + resource naming | §6.3 | P1 |
 | ~~POSIX-shm QoS mapping column + resource naming~~ | §6.3, §6.4 | **resolved (P1b)** |
 | POSIX-shm per-record §2 frame alignment (segment-local record layout is a recorded divergence) | §6.4 | before M12 targets this backend |
 | Zenoh QoS mapping column + key-expression mapping | §6.3 | P2 |
-| Introspection segment byte layout | §8 | P1b introspection follow-up (shares the §6.4 substrate) |
+| ~~Introspection segment byte layout~~ | §8 | **resolved (P1b introspection follow-up)** — no separate segment: §8 documents the per-topic header layout (v2) + the normative external read protocol |

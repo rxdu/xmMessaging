@@ -15,6 +15,11 @@
  *   flood_queue <count>
  *       Advertise (best-effort default), wait for >= 1 subscriber, publish
  *       <count> values as fast as possible (the M3 flood producer).
+ *   publish_pause <n> <period_us> <pause_ms> <m>
+ *       Advertise latest-only, wait for >= 1 subscriber, publish n values
+ *       at the period, go silent for pause_ms WHILE STAYING ALIVE, then
+ *       publish m more (the M10-A3 "paused publisher" fault: rising
+ *       last-publish age with a live pid — distinct from death).
  *
  * Exit codes: 0 ok; 2 Advertise refused; 3 match wait expired; 64 usage.
  *
@@ -84,6 +89,38 @@ int main(int argc, char** argv) {
     FillShmPlan(plan, id);
     pub.Publish(plan);
     return 0;  // exits immediately: the master slot must warm-start M2
+  }
+
+  if (role == "publish_pause" && argc == 8) {
+    const std::uint64_t n = std::strtoull(argv[4], nullptr, 10);
+    const long period_us = std::strtol(argv[5], nullptr, 10);
+    const long pause_ms = std::strtol(argv[6], nullptr, 10);
+    const std::uint64_t m = std::strtoull(argv[7], nullptr, 10);
+    auto pub = domain.Advertise<ShmTestPlan>(
+        topic, {.history = msg::History::LatestOnly()});
+    if (pub.status() != msg::AdvertiseStatus::kOk) {
+      return 2;
+    }
+    if (domain.WaitUntilMatched({&pub}, 5s) != msg::WaitStatus::kMatched) {
+      return 3;
+    }
+    ShmTestPlan plan{};
+    for (std::uint64_t i = 0; i < n; ++i) {
+      FillShmPlan(plan, i + 1);
+      pub.Publish(plan);
+      if (period_us > 0) {
+        ::usleep(static_cast<useconds_t>(period_us));
+      }
+    }
+    ::usleep(static_cast<useconds_t>(pause_ms) * 1000u);  // the fault
+    for (std::uint64_t i = 0; i < m; ++i) {
+      FillShmPlan(plan, n + i + 1);
+      pub.Publish(plan);
+      if (period_us > 0) {
+        ::usleep(static_cast<useconds_t>(period_us));
+      }
+    }
+    return 0;
   }
 
   if (role == "flood_queue" && argc == 5) {

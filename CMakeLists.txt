@@ -10,6 +10,9 @@ project(xmMessaging VERSION 0.0.1 LANGUAGES CXX)
 option(BUILD_TESTING "Build tests" OFF)
 option(XMMESSAGING_BUILD_SCENARIOS "Build the scenario acceptance suite" ON)
 option(XMMESSAGING_BUILD_BENCH "Build the M9 benchmark tier (bench/)" OFF)
+# The R5 introspection CLI (tools/xmmsg): part of the shipped payload, so it
+# defaults ON — unlike bench/scenarios it is a user-facing deliverable.
+option(XMMESSAGING_BUILD_TOOLS "Build the xmmsg introspection CLI (R5)" ON)
 # Warnings-as-errors is a CI gate, not a local default: local builds keep
 # -Wall -Wextra so a new compiler's novel warnings never block local work;
 # CI passes -DXMMESSAGING_WERROR=ON (telemetry's XMOTION_WERROR pattern).
@@ -146,6 +149,13 @@ if (XMMESSAGING_BUILD_SCENARIOS)
       PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
   set_source_files_properties(test/scenarios/m6_reach_transparency.cpp
       PROPERTIES COMPILE_OPTIONS -Wno-return-type)
+endif ()
+
+## R5/M10: the xmmsg introspection CLI. Added BEFORE the test tree so the
+## M10/M11 behavioral tests can locate the binary (they run it as a real
+## subprocess — the CLI is the deliverable under test).
+if (XMMESSAGING_BUILD_TOOLS)
+  add_subdirectory(tools/xmmsg)
 endif ()
 
 if (BUILD_TESTING)

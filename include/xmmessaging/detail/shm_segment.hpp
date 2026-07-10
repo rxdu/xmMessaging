@@ -78,7 +78,11 @@ namespace detail {
 // ---- segment constants (part of the layout contract; bumping any of them
 // bumps kShmLayoutVersion so mismatched builds refuse instead of corrupt) --
 inline constexpr std::uint64_t kShmMagic = 0x31455347534D4D58ULL;  // "XMMSGSE1"
-inline constexpr std::uint32_t kShmLayoutVersion = 1;
+// v2 (P1b introspection follow-up): the header gained the R6 refusal-
+// visibility record (refusal_count / refused_* below, M11-A3). v1 readers
+// would compute wrong data-plane offsets, so the version bump makes them
+// refuse instead (the refuse-unknown rule).
+inline constexpr std::uint32_t kShmLayoutVersion = 2;
 inline constexpr std::uint32_t kShmEnvelopeVersion = 0;  // wire-contract §2
 // Per-topic subscriber bound (the in-process reach bounds at 64; the shm
 // segment reserves real ring capacity per slot, so the bound is tighter —
@@ -166,6 +170,23 @@ struct ShmSegmentHeader {
   std::atomic<std::uint64_t> pub_publish_count;
   std::atomic<std::uint64_t> pub_bytes;
 
+  // R6 refusal-visibility record (M11-A3, layout v2): the most recent
+  // type-mismatch refusal on this topic, written by the REFUSED attacher on
+  // its wiring path (OpenOrCreate's kTypeMismatch exit) so an external
+  // observer can show BOTH hashes — the topic's established schema_hash
+  // above and the hash the refused endpoint arrived with. Deliberately a
+  // last-writer-wins advisory slot, the one stated exception to the
+  // single-writer-per-slot rule (wire-contract §8): every field is one
+  // atomic (no torn reads possible), writers are wiring-path only (never
+  // the data path), and concurrent refusals can interleave fields — the
+  // monotonic refusal_count is the reliable "a refusal happened" signal,
+  // the refused_* fields identify the latest offender.
+  std::atomic<std::uint64_t> refusal_count;        // 0 = never refused
+  std::atomic<std::uint64_t> refused_schema_hash;  // §4.1 rendering: 0x%016X
+  std::atomic<std::uint64_t> refused_payload_size;
+  std::atomic<std::uint32_t> refused_pid;
+  std::uint32_t reserved0;  // explicit padding (deterministic header bytes)
+
   ShmSubSlot sub_slots[kShmMaxSubscribers];
 };
 
@@ -175,6 +196,22 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free &&
                   std::atomic<std::uint32_t>::is_always_lock_free,
               "segment atomics must be address-free (lock-free) to be "
               "shared across mappings");
+// The header byte layout is published (wire-contract §8, layout v2) so an
+// external reader can be written from the spec alone. These asserts keep
+// the struct honest to the published offsets; any drift is a compile error
+// AND a kShmLayoutVersion bump.
+static_assert(std::is_standard_layout_v<ShmSegmentHeader>,
+              "the header layout is a cross-process contract");
+static_assert(sizeof(ShmSubSlot) == 56, "published sub-slot stride (§8)");
+static_assert(offsetof(ShmSegmentHeader, schema_hash) == 16 &&
+                  offsetof(ShmSegmentHeader, init_state) == 64 &&
+                  offsetof(ShmSegmentHeader, accepted_ordinal) == 72 &&
+                  offsetof(ShmSegmentHeader, pub_pid) == 80 &&
+                  offsetof(ShmSegmentHeader, pub_publish_count) == 88 &&
+                  offsetof(ShmSegmentHeader, refusal_count) == 104 &&
+                  offsetof(ShmSegmentHeader, sub_slots) == 136 &&
+                  sizeof(ShmSegmentHeader) == 1032,
+              "published header offsets (wire-contract §8, layout v2)");
 
 // ---- naming (wire-contract §6.2, resolved at P1b) --------------------------
 // Segment name: "/xmmsg.<isolation-key>.<topic>". The isolation key is
@@ -403,6 +440,15 @@ inline ShmAttachStatus ShmMapping::OpenOrCreate(
     }
     if (h->schema_hash != schema_hash || h->payload_size != payload_size ||
         h->payload_align != payload_align) {
+      // R6 refusal, made VISIBLE (M11-A3): before walking away, the refused
+      // attacher records what it arrived with, so external introspection can
+      // show both hashes. Wiring path, advisory last-writer-wins slot — see
+      // the field comment in ShmSegmentHeader.
+      h->refused_schema_hash.store(schema_hash, std::memory_order_relaxed);
+      h->refused_payload_size.store(payload_size, std::memory_order_relaxed);
+      h->refused_pid.store(static_cast<std::uint32_t>(::getpid()),
+                           std::memory_order_relaxed);
+      h->refusal_count.fetch_add(1, std::memory_order_release);
       ::munmap(head_map, sizeof(ShmSegmentHeader));
       ::close(fd);
       return ShmAttachStatus::kTypeMismatch;

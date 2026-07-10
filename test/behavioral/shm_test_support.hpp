@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -98,21 +99,28 @@ inline std::string UniqueDomainName(const char* tag) {
   return std::string(tag) + "_" + std::to_string(::getpid());
 }
 
-// fork + execv of the helper binary (XMMSG_SHM_HELPER_PATH from CMake).
-inline pid_t SpawnHelper(const std::vector<std::string>& args) {
+// fork + execv of an arbitrary helper binary (M11 spawns per-variant
+// builds; everything else uses the SpawnHelper wrapper below).
+inline pid_t SpawnBinary(const std::string& binary,
+                         const std::vector<std::string>& args) {
   const pid_t pid = ::fork();
   if (pid == 0) {
     std::vector<char*> argv;
-    static const std::string kHelper = XMMSG_SHM_HELPER_PATH;
-    argv.push_back(const_cast<char*>(kHelper.c_str()));
+    argv.push_back(const_cast<char*>(binary.c_str()));
     for (const std::string& arg : args) {
       argv.push_back(const_cast<char*>(arg.c_str()));
     }
     argv.push_back(nullptr);
-    ::execv(kHelper.c_str(), argv.data());
+    ::execv(binary.c_str(), argv.data());
     ::_exit(127);  // exec failed
   }
   return pid;
+}
+
+// fork + execv of the helper binary (XMMSG_SHM_HELPER_PATH from CMake).
+inline pid_t SpawnHelper(const std::vector<std::string>& args) {
+  static const std::string kHelper = XMMSG_SHM_HELPER_PATH;
+  return SpawnBinary(kHelper, args);
 }
 
 // Blocking reap; returns the exit code, or -signal when signalled.
@@ -191,6 +199,178 @@ class SegmentJanitor {
 
   std::string key_;
   std::vector<std::string> names_;
+};
+
+// Run a shell command, capture its stdout, return the exit code (or -1 on
+// popen/abnormal-exit failure). Used to exercise the xmmsg CLI as a real
+// subprocess — the CLI binary is the M10 deliverable, so the tests parse
+// ITS output, not just the reader library's structs.
+inline int RunCommandCaptureStdout(const std::string& command,
+                                   std::string* out) {
+  out->clear();
+  FILE* pipe = ::popen(command.c_str(), "r");
+  if (pipe == nullptr) {
+    return -1;
+  }
+  char buffer[4096];
+  std::size_t n = 0;
+  while ((n = std::fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
+    out->append(buffer, n);
+  }
+  const int status = ::pclose(pipe);
+  if (WIFEXITED(status)) {
+    return WEXITSTATUS(status);
+  }
+  return -1;
+}
+
+// Minimal JSON well-formedness checker (objects, arrays, strings, numbers,
+// true/false/null) — enough to assert the CLI's --json output PARSES, with
+// zero dependencies (family rule). Not a validator of anything semantic.
+class JsonChecker {
+ public:
+  static bool Parses(const std::string& text) {
+    JsonChecker checker(text);
+    checker.SkipWs();
+    return checker.Value() && (checker.SkipWs(), checker.at_ == text.size());
+  }
+
+ private:
+  explicit JsonChecker(const std::string& text) : text_(text) {}
+
+  char Peek() const { return at_ < text_.size() ? text_[at_] : '\0'; }
+  bool Eat(char c) {
+    if (Peek() != c) {
+      return false;
+    }
+    ++at_;
+    return true;
+  }
+  void SkipWs() {
+    while (at_ < text_.size() &&
+           (text_[at_] == ' ' || text_[at_] == '\t' || text_[at_] == '\n' ||
+            text_[at_] == '\r')) {
+      ++at_;
+    }
+  }
+  bool Literal(const char* word) {
+    const std::size_t len = std::char_traits<char>::length(word);
+    if (text_.compare(at_, len, word) != 0) {
+      return false;
+    }
+    at_ += len;
+    return true;
+  }
+  bool String() {
+    if (!Eat('"')) {
+      return false;
+    }
+    while (at_ < text_.size()) {
+      const char c = text_[at_++];
+      if (c == '"') {
+        return true;
+      }
+      if (c == '\\') {
+        if (at_ >= text_.size()) {
+          return false;
+        }
+        ++at_;  // accept any escape; \uXXXX hex digits pass as plain chars
+      }
+    }
+    return false;  // unterminated
+  }
+  bool Digits() {
+    const std::size_t start = at_;
+    while (Peek() >= '0' && Peek() <= '9') {
+      ++at_;
+    }
+    return at_ > start;
+  }
+  bool Number() {
+    if (Peek() == '-') {
+      ++at_;
+    }
+    if (!Digits()) {
+      return false;
+    }
+    if (Peek() == '.') {
+      ++at_;
+      if (!Digits()) {
+        return false;
+      }
+    }
+    if (Peek() == 'e' || Peek() == 'E') {
+      ++at_;
+      if (Peek() == '+' || Peek() == '-') {
+        ++at_;
+      }
+      if (!Digits()) {
+        return false;
+      }
+    }
+    return true;
+  }
+  bool Value() {
+    SkipWs();
+    switch (Peek()) {
+      case '{': {
+        ++at_;
+        SkipWs();
+        if (Eat('}')) {
+          return true;
+        }
+        for (;;) {
+          SkipWs();
+          if (!String()) {
+            return false;
+          }
+          SkipWs();
+          if (!Eat(':') || !Value()) {
+            return false;
+          }
+          SkipWs();
+          if (Eat('}')) {
+            return true;
+          }
+          if (!Eat(',')) {
+            return false;
+          }
+        }
+      }
+      case '[': {
+        ++at_;
+        SkipWs();
+        if (Eat(']')) {
+          return true;
+        }
+        for (;;) {
+          if (!Value()) {
+            return false;
+          }
+          SkipWs();
+          if (Eat(']')) {
+            return true;
+          }
+          if (!Eat(',')) {
+            return false;
+          }
+        }
+      }
+      case '"':
+        return String();
+      case 't':
+        return Literal("true");
+      case 'f':
+        return Literal("false");
+      case 'n':
+        return Literal("null");
+      default:
+        return Number();
+    }
+  }
+
+  const std::string& text_;
+  std::size_t at_ = 0;
 };
 
 }  // namespace shmtest

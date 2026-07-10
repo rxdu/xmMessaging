@@ -21,7 +21,7 @@ if (XMMESSAGING_WITH_POSIX_SHM AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_options(shm_test_helper PRIVATE ${XMMESSAGING_WARNINGS})
 endif ()
 
-foreach(scenario IN ITEMS m1 m2 m3 m4 m5 m6 m7 m13 m14)
+foreach(scenario IN ITEMS m1 m2 m3 m4 m5 m6 m7 m10 m11 m13 m14)
   add_executable(${scenario}_behavioral_test ${scenario}_behavioral_test.cpp)
   target_link_libraries(${scenario}_behavioral_test PRIVATE
       xmotion::xmmessaging gtest gtest_main)
@@ -34,6 +34,36 @@ foreach(scenario IN ITEMS m1 m2 m3 m4 m5 m6 m7 m13 m14)
   endif ()
   gtest_discover_tests(${scenario}_behavioral_test PROPERTIES TIMEOUT 180)
 endforeach()
+
+if (XMMSG_SHM_ENABLED)
+  # M11 rebuild skew: FOUR separately compiled builds of the same payload
+  # source (-DXMMSG_M11_VARIANT selects the divergence) — real skew, not
+  # simulated hashes. v0 doubles as the M11-A4 cross-build control.
+  foreach(variant IN ITEMS 0 1 2 3)
+    add_executable(m11_helper_v${variant} m11_helper_main.cpp)
+    target_link_libraries(m11_helper_v${variant} PRIVATE xmotion::xmmessaging)
+    target_compile_options(m11_helper_v${variant} PRIVATE ${XMMESSAGING_WARNINGS})
+    target_compile_definitions(m11_helper_v${variant} PRIVATE
+        XMMSG_M11_VARIANT=${variant})
+    add_dependencies(m11_behavioral_test m11_helper_v${variant})
+  endforeach()
+  target_compile_definitions(m11_behavioral_test PRIVATE
+      XMMSG_M11_HELPER_V0="$<TARGET_FILE:m11_helper_v0>"
+      XMMSG_M11_HELPER_V1="$<TARGET_FILE:m11_helper_v1>"
+      XMMSG_M11_HELPER_V2="$<TARGET_FILE:m11_helper_v2>"
+      XMMSG_M11_HELPER_V3="$<TARGET_FILE:m11_helper_v3>")
+
+  # M10's CLI legs run the real xmmsg binary as a subprocess — the CLI is
+  # the deliverable, so the tests assert ITS stdout (skipped gracefully if
+  # tools are off: the reader-library legs still run).
+  if (TARGET xmmsg)
+    foreach(cli_consumer IN ITEMS m10_behavioral_test m11_behavioral_test)
+      target_compile_definitions(${cli_consumer} PRIVATE
+          XMMSG_CLI_PATH="$<TARGET_FILE:xmmsg>")
+      add_dependencies(${cli_consumer} xmmsg)
+    endforeach()
+  endif ()
+endif ()
 
 # R6 wire-contract §4/§5 conformance (hash + canonical description).
 add_executable(wire_schema_test wire_schema_test.cpp)
