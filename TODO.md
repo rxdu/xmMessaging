@@ -9,8 +9,8 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [x] M3 back-pressure wish-code (deltas D8-D9: never-blocking Publish, per-subscriber drops, queryable counters)
 - [x] M5 request/response wish-code (deltas D10-D11: threadless take/reply server, non-defaultable deadline)
 - [x] M6 reach-parametric fixture wish-code (delta D12: per-backend Domain factories, Supports() matrix query, age_class)
-- [ ] M7 trace-continuity wish-code
-- [ ] Record API deltas in scenarios.md; freeze P0a header design from them
+- [x] M7 trace-continuity wish-code (delta D13: auto-capture on publish, explicit RAII adopt on take)
+- [~] Record API deltas in scenarios.md (D1-D13 recorded); freeze P0a header design from them
 
 ## P0a — API headers + in-process reach skeleton
 
