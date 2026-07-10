@@ -9,6 +9,11 @@ project(xmMessaging VERSION 0.0.1 LANGUAGES CXX)
 # still compiles UNMODIFIED as an OBJECT library (it is the API spec).
 option(BUILD_TESTING "Build tests" OFF)
 option(XMMESSAGING_BUILD_SCENARIOS "Build the scenario acceptance suite" ON)
+option(XMMESSAGING_BUILD_BENCH "Build the M9 benchmark tier (bench/)" OFF)
+# Warnings-as-errors is a CI gate, not a local default: local builds keep
+# -Wall -Wextra so a new compiler's novel warnings never block local work;
+# CI passes -DXMMESSAGING_WERROR=ON (telemetry's XMOTION_WERROR pattern).
+option(XMMESSAGING_WERROR "Treat warnings as errors on first-party targets" OFF)
 # Backend seam (ADR 0006 / ADR 0004 pattern): one option per engine. The
 # external-dependency backends default off; the dependency-free POSIX shm
 # fallback defaults on (design.md "Backend seam"). The in-process reach is
@@ -39,6 +44,13 @@ elseif (NOT XMMESSAGING_SANITIZE STREQUAL "")
 endif ()
 
 include(GNUInstallDirs)
+
+## First-party warning flags (vendored code is SYSTEM/excluded and never
+## gates): every first-party target uses this one list.
+set(XMMESSAGING_WARNINGS -Wall -Wextra)
+if (XMMESSAGING_WERROR)
+  list(APPEND XMMESSAGING_WARNINGS -Werror)
+endif ()
 
 ## Foundation dependency: xmBase (clock, telemetry context, common types).
 ## In-tree target > installed > bundled submodule — same resolution order as
@@ -75,7 +87,7 @@ target_include_directories(xmmessaging PUBLIC
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(xmmessaging PUBLIC xmotion::xmBase Threads::Threads)
 target_compile_features(xmmessaging PUBLIC cxx_std_17)
-target_compile_options(xmmessaging PRIVATE -Wall -Wextra)
+target_compile_options(xmmessaging PRIVATE ${XMMESSAGING_WARNINGS})
 add_library(xmotion::xmmessaging ALIAS xmmessaging)
 
 ## Backend seam status (engines arrive at P1/P1b/P2; the options exist now so
@@ -107,7 +119,7 @@ if (XMMESSAGING_BUILD_SCENARIOS)
       test/scenarios/m14_stack_startup.cpp)
   target_link_libraries(xmmessaging_scenarios PRIVATE xmotion::xmmessaging)
   target_compile_options(xmmessaging_scenarios PRIVATE
-      -Wall -Wextra
+      ${XMMESSAGING_WARNINGS}
       -include ${CMAKE_CURRENT_SOURCE_DIR}/test/scenarios/scenario_support.hpp)
   ## M1 and M13 define TrajectoryHead / StateEstimate scenario-locally (the
   ## wish-code convention); the support header defines the identical layout
@@ -150,6 +162,14 @@ if (BUILD_TESTING)
     endif ()
   endif ()
   add_subdirectory(test/behavioral)
+  ## M8: lib-only link test + dependency-closure gate (test/link/).
+  add_subdirectory(test/link)
+endif ()
+
+## M9: the benchmark tier (bench/). Opt-in — a plain library consumer never
+## builds it; `scripts/bench.sh` is the one-command entry point (M9-A1).
+if (XMMESSAGING_BUILD_BENCH)
+  add_subdirectory(bench)
 endif ()
 
 message(STATUS "xmMessaging: P0b — in-process reach + behavioral suite (BUILD_TESTING); see docs/scenarios.md")

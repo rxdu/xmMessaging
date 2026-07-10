@@ -582,6 +582,17 @@ class RpcTopic final : public TopicBase {
 
   // ---- call side (D11) ----------------------------------------------------
 
+  // GCC 11 -O2/-O3 false positive (surfaced by the M9 bench TU): value-range
+  // analysis through the TryClaim CAS loop synthesizes an impossible slot
+  // origin and reports the fixed-size envelope-context memcpy below as
+  // "writing into a region of size 0". Both sides are 24 bytes by
+  // constexpr (kEnvelopeContextSize == telemetry::kContextWireSize); the
+  // copy is bounded by construction. Same per-site scoping discipline as
+  // the scenario suite's known-noise diagnostics.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
   Result<Rsp> Call(const Req& request, Duration deadline) {
     Result<Rsp> result;  // kNoServer until proven otherwise
     // M5-A3: absent-server fails fast, distinct from timeout. Judged at
@@ -669,6 +680,9 @@ class RpcTopic final : public TopicBase {
     ReleaseSlot(*slot);
     return result;
   }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
   // ---- serve side (D10) ---------------------------------------------------
 

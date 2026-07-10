@@ -20,17 +20,17 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 - [x] wire-contract spec v0 (docs/wire-contract.md): 64B LE envelope, FNV-1a-64 schema hash + 6 verified conformance vectors, payload rules, metric schema; TBDs marked for P1/P1b/P2
 - [ ] per-reach support matrix representation (R3): queryable at wiring time
 - [x] xmBase dependency resolution (in-tree > installed > bundled submodule pinned at v0.4.0)
-- [ ] M8 lib-only link test (zero transport deps by default)
+- [x] M8 lib-only link test (zero transport deps by default) — `test/link/`: gtest-free binary linking only xmmessaging (M8-A1/A2), `ldd` dependency-closure gate (M8-A3), fresh-configure default-OFF check (M8-A1)
 
 ## P0b — in-process reach behavioral
 
 - [x] LatestMailbox implementation (wait-free depth-1, stamps, overwrite counter) — parameterized over placement (heap vs shared mapping) + waiter (condvar vs futex) from day one, so the POSIX shm backend reuses it unchanged (`detail/latest_slot.hpp`; TSan-clean seqlock)
 - [x] queue<N> + reliability policies (`detail/bounded_queue.hpp`: SPSC lock-free; shared-ownership publishers mutex-serialized — lock-free MPMC is a P1 item)
 - [~] `messaging.*` self-instrumentation — D9 introspect counters always-on; R11 §7 instruments emitted via the xmBase telemetry API (counters, take_age histogram, gauges); hop_latency histogram + label plumbing + M13-A4 capture verification remain (P0b part 2)
-- [ ] M9 in-process benchmark layer (`bench/`: per-verb micro + hop-path; JSON report, CI artifact)
+- [x] M9 in-process benchmark layer (`bench/`: micro/path/system/contended layers, hand-rolled harness per family precedent; `scripts/bench.sh` one-command JSON report with hardware context; M9-A3 alloc gate; report-only comparison vs `bench/reference.json` — M9-A5 values TO BE PINNED by CI; 1 MiB payload deferred to P1 pool sizing)
 - [~] M1, M2, M3, M5, M6(in-proc), M7(in-proc), M13(in-proc), M14(in-proc) + M9(in-proc) — **v0.1 gate** — M1/M2/M3/M14 behavioral tests pass (plain + TSan, `test/behavioral/`); M5 (Server/Client verbs), M6/M7/M13 tests are P0b part 2
 - [ ] R6 schema hash: replace the interim typeid-based description (`detail/schema_hash.hpp`) with the wire-contract §4.2 canonical form + V1–V6 vectors before any hash crosses a process boundary (P1)
-- [ ] aarch64 leg of the behavioral suite (R1: seqlock memory ordering must be validated on the weaker memory model in CI)
+- [~] aarch64 leg of the behavioral suite (R1: seqlock memory ordering must be validated on the weaker memory model in CI) — `ubuntu-24.04-arm` job added to `.github/workflows/ci.yml`; proven when the first CI run goes green
 
 ## P1 — iceoryx2 backend (inter-process)
 

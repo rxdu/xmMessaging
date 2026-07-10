@@ -9,6 +9,6 @@ foreach(scenario IN ITEMS m1 m2 m3 m5 m6 m7 m13 m14)
   add_executable(${scenario}_behavioral_test ${scenario}_behavioral_test.cpp)
   target_link_libraries(${scenario}_behavioral_test PRIVATE
       xmotion::xmmessaging gtest gtest_main)
-  target_compile_options(${scenario}_behavioral_test PRIVATE -Wall -Wextra)
+  target_compile_options(${scenario}_behavioral_test PRIVATE ${XMMESSAGING_WARNINGS})
   gtest_discover_tests(${scenario}_behavioral_test PROPERTIES TIMEOUT 180)
 endforeach()
