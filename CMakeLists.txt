@@ -37,7 +37,13 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(XMMESSAGING_SANITIZE "" CACHE STRING
     "Build everything with a sanitizer: '' (off), 'thread', or 'address'")
 if (XMMESSAGING_SANITIZE STREQUAL "thread")
-  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  # -Wno-tsan: GCC >= 13 warns that atomic_thread_fence is not instrumented
+  # by TSan. The seqlock is deliberately the Boehm construction — relaxed
+  # ATOMIC data words + fences — so TSan's race detection is sound through
+  # the atomic accesses without modeling the fences; the warning flags a
+  # known, accepted limitation, and under XMMESSAGING_WERROR it would
+  # otherwise break the sanitizer leg (see latest_slot.hpp ordering notes).
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g -Wno-tsan)
   add_link_options(-fsanitize=thread)
 elseif (XMMESSAGING_SANITIZE STREQUAL "address")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
