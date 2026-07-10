@@ -12,7 +12,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 2. **Behavioral test (P0b+)** — compiled against the real API; acceptance criteria asserted with gtest.
 3. **Benchmark / regression (P1+)** — M1 and M3 become permanent latency/back-pressure gates run in CI on every change.
 
-**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8 pass as behavioral tests on the in-process reach, plus M9's in-process benchmark layer (a release without its reference numbers violates R4). M4 and M10 require iceoryx2 (P1); M7's cross-process half requires a real IPC backend; M5 lands with the first backend that carries it.
+**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8, and the in-process legs of M13 and M14 pass as behavioral tests, plus M9's in-process benchmark layer (a release without its reference numbers violates R4). M4 and M10 require an IPC backend (P1/P1b); M7's cross-process half likewise; M5 lands with the first backend that carries it.
 
 ## Conventions established here
 
