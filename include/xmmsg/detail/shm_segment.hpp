@@ -68,8 +68,8 @@
 #include <thread>
 #include <type_traits>
 
-#include "xmmessaging/detail/schema_hash.hpp"
-#include "xmmessaging/qos.hpp"
+#include "xmmsg/detail/schema_hash.hpp"
+#include "xmmsg/qos.hpp"
 
 namespace xmotion {
 namespace messaging {

@@ -60,8 +60,8 @@
 #include <string>
 #include <vector>
 
-#include "xmmessaging/detail/latest_slot.hpp"  // CpuRelax (seqlock retries)
-#include "xmmessaging/detail/shm_segment.hpp"
+#include "xmmsg/detail/latest_slot.hpp"  // CpuRelax (seqlock retries)
+#include "xmmsg/detail/shm_segment.hpp"
 
 namespace xmotion {
 namespace messaging {

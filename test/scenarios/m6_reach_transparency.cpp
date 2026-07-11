@@ -8,7 +8,7 @@
 // wishes the three Domain factories, the support-matrix query (R3), and
 // the synced-clock declaration (R8) into existence.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 

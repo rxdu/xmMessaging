@@ -54,7 +54,7 @@ int main() {
 #include <vector>
 
 #include "xmbase/types/time.hpp"
-#include "xmmessaging/detail/introspect_reader.hpp"
+#include "xmmsg/detail/introspect_reader.hpp"
 
 namespace det = xmotion::messaging::detail;
 

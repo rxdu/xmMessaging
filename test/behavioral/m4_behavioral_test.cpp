@@ -30,7 +30,7 @@
 #include <thread>
 
 #include "shm_test_support.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #if !defined(XMMESSAGING_HAS_POSIX_SHM)
 

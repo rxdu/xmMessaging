@@ -10,7 +10,7 @@
 //      take/reply — the application polls it from a thread IT owns, same
 //      as every other loop in the family.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #include <thread>
 

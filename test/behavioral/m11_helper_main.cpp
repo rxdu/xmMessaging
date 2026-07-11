@@ -42,7 +42,7 @@ int main() { return 64; }
 #include <cstring>
 #include <string>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 using namespace std::chrono_literals;

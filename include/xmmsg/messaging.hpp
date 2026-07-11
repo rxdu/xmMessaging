@@ -12,9 +12,9 @@
 
 #pragma once
 
-#include "xmmessaging/domain.hpp"
-#include "xmmessaging/endpoints.hpp"
-#include "xmmessaging/payload_traits.hpp"
-#include "xmmessaging/qos.hpp"
-#include "xmmessaging/sample.hpp"
-#include "xmmessaging/status.hpp"
+#include "xmmsg/domain.hpp"
+#include "xmmsg/endpoints.hpp"
+#include "xmmsg/payload_traits.hpp"
+#include "xmmsg/qos.hpp"
+#include "xmmsg/sample.hpp"
+#include "xmmsg/status.hpp"

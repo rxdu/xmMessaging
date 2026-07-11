@@ -28,8 +28,8 @@
 #include <string>
 #include <thread>
 
-#include "xmmessaging/detail/schema_hash.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/detail/schema_hash.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 using namespace std::chrono_literals;

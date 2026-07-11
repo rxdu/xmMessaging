@@ -18,7 +18,7 @@
 
 #include <cstdint>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace detail = xmotion::messaging::detail;
 

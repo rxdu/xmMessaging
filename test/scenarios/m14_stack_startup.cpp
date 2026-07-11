@@ -8,7 +8,7 @@
 // host share nothing. This is the file a nav-stack launcher gets copied
 // from, so it is written as one.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 

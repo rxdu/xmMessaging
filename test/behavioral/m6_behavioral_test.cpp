@@ -36,7 +36,7 @@
 #include <string>
 #include <thread>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 using namespace std::chrono_literals;

@@ -45,7 +45,7 @@
 #include <vector>
 
 #include "shm_test_support.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #if !defined(XMMESSAGING_HAS_POSIX_SHM)
 
@@ -55,7 +55,7 @@ TEST(M10Behavioral, DISABLED_RequiresPosixShmBackend) {
 
 #else
 
-#include "xmmessaging/detail/introspect_reader.hpp"
+#include "xmmsg/detail/introspect_reader.hpp"
 
 namespace msg = xmotion::messaging;
 namespace det = xmotion::messaging::detail;

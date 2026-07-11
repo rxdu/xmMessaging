@@ -12,7 +12,7 @@
 //     cross-contamination M7-A2 forbids.
 
 #include "xmbase/telemetry/telemetry.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 namespace tel = xmotion::telemetry;

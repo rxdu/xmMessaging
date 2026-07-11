@@ -66,9 +66,9 @@
 #include <mutex>
 #include <type_traits>
 
-#include "xmmessaging/detail/mail_record.hpp"
-#include "xmmessaging/detail/placement.hpp"
-#include "xmmessaging/detail/waiter.hpp"
+#include "xmmsg/detail/mail_record.hpp"
+#include "xmmsg/detail/placement.hpp"
+#include "xmmsg/detail/waiter.hpp"
 
 namespace xmotion {
 namespace messaging {

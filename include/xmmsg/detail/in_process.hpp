@@ -86,11 +86,11 @@
 
 #include "xmbase/telemetry/context.hpp"
 #include "xmbase/telemetry/handles.hpp"
-#include "xmmessaging/detail/bounded_queue.hpp"
-#include "xmmessaging/detail/envelope.hpp"
-#include "xmmessaging/detail/latest_slot.hpp"
-#include "xmmessaging/detail/mail_record.hpp"
-#include "xmmessaging/detail/schema_hash.hpp"
+#include "xmmsg/detail/bounded_queue.hpp"
+#include "xmmsg/detail/envelope.hpp"
+#include "xmmsg/detail/latest_slot.hpp"
+#include "xmmsg/detail/mail_record.hpp"
+#include "xmmsg/detail/schema_hash.hpp"
 
 namespace xmotion {
 namespace messaging {
@@ -1031,7 +1031,7 @@ class ClientImpl final : public EndpointImpl {
 // Needs EndpointImpl/LoanPool/DerivedInfo above; compiled out (and every
 // dispatch branch with it) when the backend option is off. Included between
 // namespace blocks: it opens its own (and pulls in system headers).
-#include "xmmessaging/detail/posix_shm.hpp"
+#include "xmmsg/detail/posix_shm.hpp"
 
 namespace xmotion {
 namespace messaging {

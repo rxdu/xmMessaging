@@ -24,7 +24,7 @@
 
 #include <cstdint>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 

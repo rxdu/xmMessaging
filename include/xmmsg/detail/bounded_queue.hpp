@@ -44,8 +44,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "xmmessaging/detail/mail_record.hpp"
-#include "xmmessaging/detail/placement.hpp"
+#include "xmmsg/detail/mail_record.hpp"
+#include "xmmsg/detail/placement.hpp"
 
 namespace xmotion {
 namespace messaging {

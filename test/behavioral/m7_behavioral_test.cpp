@@ -31,7 +31,7 @@
 #include <thread>
 
 #include "xmbase/telemetry/context.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 namespace tel = xmotion::telemetry;
