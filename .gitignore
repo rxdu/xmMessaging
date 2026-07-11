@@ -2,6 +2,10 @@
 build*/
 cmake-build-*/
 
+# bench reports are per-machine artifacts (CI uploads them, M9-A4);
+# only bench/reference.json is version-controlled
+bench/results/
+
 # editor / temp
 *~
 *.swp

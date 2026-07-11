@@ -1,0 +1,13 @@
+include(CMakeFindDependencyMacro)
+
+# Re-discover the dependencies that xmMessaging's public (imported) target
+# references, so downstream find_package(xmMessaging) consumers get a usable
+# xmotion::xmmessaging target. Consumers link xmotion::xmmessaging.
+#
+# xmBase >= 0.4.0 is the declared foundation floor (clock, telemetry
+# context) — the same pin as the library's own find_package resolution.
+find_dependency(xmBase 0.4.0 REQUIRED)
+find_dependency(Threads REQUIRED)
+
+# Add the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/xmMessagingTargets.cmake")

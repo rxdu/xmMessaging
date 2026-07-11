@@ -1,0 +1,137 @@
+# CI for xmMessaging (family conventions: telemetry cpp.yml shape —
+# checkout with submodules for the bundled xmBase, matrix over the two
+# supported Ubuntu LTS baselines, sanitizer job, artifact upload).
+#
+# Warnings-as-errors is a CI-only flag (XMMESSAGING_WERROR): local builds
+# stay -Wall -Wextra so a new compiler's novel warnings never block work.
+name: C/C++ CI
+
+on:
+  push:
+    branches: [main]
+  # No branch filter: stacked PRs (feature -> spec-branch) must get CI too —
+  # the aarch64 leg is the only place the seqlock meets a weak memory model.
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential ninja-build libeigen3-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON -DXMMESSAGING_WERROR=ON
+      - name: Assert lib-only defaults (M8-A1)
+        # Backends are strictly opt-in: the configure above passed no
+        # backend option, so the cache must show both OFF.
+        run: |
+          grep -q 'XMMESSAGING_WITH_ICEORYX2:BOOL=OFF' build/CMakeCache.txt
+          grep -q 'XMMESSAGING_WITH_ZENOH:BOOL=OFF' build/CMakeCache.txt
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Run test suites (behavioral + M8 link/ldd gates)
+        run: cd build && ctest --output-on-failure
+
+  # aarch64 (R1): the seqlock memory ordering must hold on the weaker
+  # memory model, not just x86-TSO. Build + ctest only — bench numbers from
+  # shared runners are noise.
+  build-and-test-arm64:
+    name: build (ubuntu-24.04-arm, aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential ninja-build libeigen3-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON -DXMMESSAGING_WERROR=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Run test suites
+        run: cd build && ctest --output-on-failure
+
+  # R1: "time-to-first-message under 10 minutes, quickstart tested in CI".
+  # This job executes scripts/quickstart.sh — the SAME script the README
+  # documents step by step — from a clean checkout on both supported LTS
+  # baselines, so the documented commands and the verified commands cannot
+  # drift. (Deliberately near-duplicates the build job's configure+build:
+  # the claim under test is the user's literal first-run experience.)
+  quickstart:
+    name: quickstart (${{ matrix.os }}, R1)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Run the README quickstart, literally
+        run: ./scripts/quickstart.sh
+
+  # M1-A2 and friends: the behavioral suite must be TSan-clean — the seqlock
+  # and SPSC rings are only trustworthy race-instrumented.
+  tsan:
+    name: sanitizers (tsan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential ninja-build libeigen3-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DBUILD_TESTING=ON -DXMMESSAGING_WERROR=ON
+          -DXMMESSAGING_SANITIZE=thread
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Run test suites under TSan
+        run: cd build && ctest --output-on-failure
+
+  # M9 smoke: one command produces the machine-readable report with hardware
+  # context (M9-A1) and proves the alloc gate (M9-A3). Report-only vs the
+  # unpinned reference (M9-A5 gating arms when CI pins reference.json);
+  # numbers from shared runners are context-stamped artifacts, not gates.
+  bench-smoke:
+    name: bench smoke (report-only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libeigen3-dev
+      - name: Run the M9 suite (smoke profile)
+        run: ./scripts/bench.sh --smoke
+      - name: Validate the report parses
+        run: |
+          report="$(ls bench/results/*.json | tail -n 1)"
+          python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$report"
+      - name: Upload bench report (M9-A4)
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-report
+          path: bench/results/*.json
+          if-no-files-found: error
