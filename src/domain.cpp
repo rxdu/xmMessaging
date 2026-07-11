@@ -12,7 +12,7 @@
  * Copyright (c) 2026 Ruixiang Du (rdu)
  */
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #include <unistd.h>  // geteuid — D17 default key derivation (user + name)
 

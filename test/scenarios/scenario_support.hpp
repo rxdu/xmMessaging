@@ -29,7 +29,7 @@
 #include <thread>
 
 #include "xmbase/telemetry/telemetry.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 // D13 names the take-side adoption RAII `tel::ContextScope`; xmBase spells
 // it ContextGuard (context.hpp). Alias here so M7 compiles as wished —

@@ -16,7 +16,7 @@
 
 #include <cstdint>
 
-#include "xmmessaging/detail/envelope.hpp"
+#include "xmmsg/detail/envelope.hpp"
 
 namespace xmotion {
 namespace messaging {

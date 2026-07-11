@@ -33,7 +33,7 @@
 #include <string>
 #include <vector>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 // ---------------------------------------------------------------------------
 // The cross-process payload: fixed layout, explicitly padded (§3), opted

@@ -16,9 +16,9 @@
 #include <string>
 #include <string_view>
 
-#include "xmmessaging/endpoints.hpp"
-#include "xmmessaging/qos.hpp"
-#include "xmmessaging/status.hpp"
+#include "xmmsg/endpoints.hpp"
+#include "xmmsg/qos.hpp"
+#include "xmmsg/status.hpp"
 
 namespace xmotion {
 namespace messaging {
@@ -154,4 +154,4 @@ class Domain {
 // introspect counters). Included last because it needs the Domain and
 // endpoint declarations complete. Applications keep including only
 // messaging.hpp; this is not an API surface.
-#include "xmmessaging/detail/in_process.hpp"
+#include "xmmsg/detail/in_process.hpp"

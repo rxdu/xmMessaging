@@ -28,7 +28,7 @@
 
 #include <cstdint>
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #ifndef XMMSG_M11_VARIANT
 #define XMMSG_M11_VARIANT 0  // baseline (the test binary compiles this)

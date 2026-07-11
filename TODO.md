@@ -15,7 +15,7 @@ Phases per docs/design.md; the scenario suite (docs/scenarios.md) gates each one
 
 ## P0a — API headers + in-process reach skeleton
 
-- [x] `include/xmmessaging/` API tier — 8 headers, wish-code compiles unmodified as OBJECT lib, zero warnings (deltas D19-D20 record the freeze resolutions)
+- [x] `include/xmmsg/` API tier — 8 headers, wish-code compiles unmodified as OBJECT lib, zero warnings (deltas D19-D20 record the freeze resolutions)
 - [~] schema-hash mechanism (R6): algorithm + vectors specified in wire-contract.md; C++ compile-time generator lands with P0b/P1 matching
 - [x] wire-contract spec v0 (docs/wire-contract.md): 64B LE envelope, FNV-1a-64 schema hash + 6 verified conformance vectors, payload rules, metric schema; TBDs marked for P1/P1b/P2
 - [ ] per-reach support matrix representation (R3): queryable at wiring time

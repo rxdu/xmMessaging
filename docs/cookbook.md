@@ -6,7 +6,7 @@
 Every recipe is adapted from the behavioral acceptance suite (`test/behavioral/`), which compiles and passes on every CI run — the code shapes here are the tested call sites, not invented examples. Include one header, link one target:
 
 ```cpp
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 using namespace std::chrono_literals;

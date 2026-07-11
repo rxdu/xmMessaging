@@ -9,7 +9,7 @@
 // how "how old is the information" survives a hop while "how old is the
 // value" resets.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 

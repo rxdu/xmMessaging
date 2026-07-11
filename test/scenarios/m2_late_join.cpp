@@ -8,7 +8,7 @@
 // ORIGINAL stamp, so age never lies — and joining/leaving never perturbs
 // the incumbent subscriber.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #include <thread>
 

@@ -51,7 +51,7 @@
 
 #include "alloc_probe.hpp"  // ONE TU per binary: defines operator new/delete
 #include "harness.hpp"
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 using xmmsg_bench::BenchResult;

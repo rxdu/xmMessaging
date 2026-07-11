@@ -3,7 +3,7 @@ project(xmMessaging VERSION 0.1.0 LANGUAGES CXX)
 
 # P0b (part 1): the in-process reach is real — xmmessaging is a compiled
 # STATIC library (seqlock LatestSlot, SPSC BoundedQueue, typed Domain
-# registry; see include/xmmessaging/detail/ and src/), and the behavioral
+# registry; see include/xmmsg/detail/ and src/), and the behavioral
 # suite (test/behavioral/, gated by BUILD_TESTING) asserts the M1/M2/M3/M14
 # acceptance criteria from docs/scenarios.md. The wish-code scenario suite
 # still compiles UNMODIFIED as an OBJECT library (it is the API spec).

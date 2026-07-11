@@ -14,8 +14,8 @@
 #include <cstdint>
 
 #include "xmbase/telemetry/context.hpp"
-#include "xmmessaging/detail/envelope.hpp"  // the wire contract behind these fields
-#include "xmmessaging/qos.hpp"
+#include "xmmsg/detail/envelope.hpp"  // the wire contract behind these fields
+#include "xmmsg/qos.hpp"
 
 namespace xmotion {
 namespace messaging {

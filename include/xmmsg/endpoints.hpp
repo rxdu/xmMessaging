@@ -17,10 +17,10 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "xmmessaging/payload_traits.hpp"
-#include "xmmessaging/qos.hpp"
-#include "xmmessaging/sample.hpp"
-#include "xmmessaging/status.hpp"
+#include "xmmsg/payload_traits.hpp"
+#include "xmmsg/qos.hpp"
+#include "xmmsg/sample.hpp"
+#include "xmmsg/status.hpp"
 
 namespace xmotion {
 namespace messaging {

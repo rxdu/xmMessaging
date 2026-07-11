@@ -10,7 +10,7 @@
 // everything. Reach-parametric: the same code must wire in-process (P0b)
 // and across processes via iceoryx2 (P1).
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 #include <atomic>
 #include <cstdint>

@@ -79,13 +79,13 @@
 
 #include "xmbase/telemetry/context.hpp"
 #include "xmbase/telemetry/handles.hpp"
-#include "xmmessaging/detail/bounded_queue.hpp"
-#include "xmmessaging/detail/envelope.hpp"
-#include "xmmessaging/detail/latest_slot.hpp"
-#include "xmmessaging/detail/mail_record.hpp"
-#include "xmmessaging/detail/placement.hpp"
-#include "xmmessaging/detail/schema_hash.hpp"
-#include "xmmessaging/detail/shm_segment.hpp"
+#include "xmmsg/detail/bounded_queue.hpp"
+#include "xmmsg/detail/envelope.hpp"
+#include "xmmsg/detail/latest_slot.hpp"
+#include "xmmsg/detail/mail_record.hpp"
+#include "xmmsg/detail/placement.hpp"
+#include "xmmsg/detail/schema_hash.hpp"
+#include "xmmsg/detail/shm_segment.hpp"
 
 namespace xmotion {
 namespace messaging {

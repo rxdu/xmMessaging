@@ -8,7 +8,7 @@
 // internally — "reliable" means the transport refuses visibly, and what
 // to do about it (retry, coalesce, shed) is caller policy.
 
-#include "xmmessaging/messaging.hpp"
+#include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
 
