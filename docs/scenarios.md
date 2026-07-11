@@ -1,6 +1,6 @@
 # xmMessaging Scenario Suite — the use cases that define the API
 
-- Status: **P0.0 wish-code in progress** (no scenario is executable yet; the API does not exist)
+- Status: **P0.0 wish-code complete** (all 14 scenarios wish-coded, deltas D1–D18 recorded; nothing executable yet — the API headers are the next phase, P0a, derived from the deltas)
 - Date: 2026-07-10
 - Governing design: [design.md](design.md) and [ADR 0006](https://github.com/rxdu/xmotion/blob/main/docs/adr/0006-messaging-layer.md)
 
@@ -12,7 +12,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 2. **Behavioral test (P0b+)** — compiled against the real API; acceptance criteria asserted with gtest.
 3. **Benchmark / regression (P1+)** — M1 and M3 become permanent latency/back-pressure gates run in CI on every change.
 
-**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8 pass as behavioral tests on the in-process reach, plus M9's in-process benchmark layer (a release without its reference numbers violates R4). M4 and M10 require iceoryx2 (P1); M7's cross-process half requires a real IPC backend; M5 lands with the first backend that carries it.
+**Gate for the v0.1 (in-process reach) release**: M1, M2, M3, M6, M8, and the in-process legs of M13 and M14 pass as behavioral tests, plus M9's in-process benchmark layer (a release without its reference numbers violates R4). M4 and M10 require an IPC backend (P1/P1b); M7's cross-process half likewise; M5 lands with the first backend that carries it.
 
 ## Conventions established here
 
@@ -38,6 +38,8 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 | M10 | External introspection | `test/scenarios/m10_introspection.cpp` + CLI | outside-the-process diagnostics (R5) | inter-process | P1 |
 | M11 | Rebuild skew: type-identity refusal | `test/scenarios/m11_type_skew.cpp` | schema-hash match gate (R6) | inter-process | P1 |
 | M12 | Foreign-language participant | `test/scenarios/m12_foreign_participant/` | wire contracts, not bindings (R10) | inter-process / inter-host | P1–P2 (first backend with a mature Python binding) |
+| M13 | Pipeline lineage & system evaluation | `test/scenarios/m13_pipeline_accounting.cpp` | origin age, metric schema, one timeline (R11) | reach-parametric | P0b, P1 |
+| M14 | Stack cold start: order, readiness, isolation, ownership | `test/scenarios/m14_stack_startup.cpp` | composition-scale contracts | reach-parametric | P0b, P1 |
 
 ---
 
@@ -149,6 +151,7 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A3: in-process publish and take are allocation-free and lock-free, proven by probe, at every payload size in the sweep.
 - A4: results are published as CI artifacts per release, and the README table of reference numbers is generated from them — never hand-written.
 - A5: a regression against the pinned reference (beyond noise bounds) fails CI, same discipline as the telemetry S1 overhead gate.
+- A6 *(R7 — WCET is established under contention, not assumed from idle runs)*: every micro-benchmark has a contended variant — a writer racing N readers on one slot, the flood profile running concurrently — and the R7 tail gates apply to the contended numbers.
 
 ## M10 — External introspection
 
@@ -189,6 +192,32 @@ Same method that shipped the telemetry stack: rather than freezing an API with z
 - A4: the spec is sufficient — the scenario's Python code imports nothing from this repository, and CI runs it from the spec + backend binding only. Any needed clarification is a spec defect, recorded like an API delta.
 - A5: a payload violating the cross-language layout rules (implicit padding) is rejected at the C++ wiring site at compile time — the rule exists on the family side, not just in prose.
 
+## M13 — Pipeline lineage & system evaluation
+
+**Purpose.** R11 as a test: a three-stage fake navigation pipeline (sensor → estimator → controller) whose end-to-end behavior is quantitatively evaluable from what the transport records — zero custom instrumentation.
+
+**Setup.** Sensor fake publishes poses at 100 Hz; estimator consumes, publishes state estimates via `PublishDerived` (lineage preserved); controller consumes at 1 kHz. Telemetry SDK bound with a capture sink. Fault injections: estimator stalled 300 ms (information ages while plans stay fresh); estimator restarted.
+
+**Acceptance criteria.**
+- A1: at the controller, `sample.origin_age()` reports the sensor-acquisition age and `sample.age()` the last-hop age; under the estimator stall, origin_age grows while age stays small — the two are provably distinct at the call site.
+- A2: hop count increments per stage; a first-hop publish has origin == stamp and hops == 0.
+- A3: end-to-end (sensor→controller) latency distribution is computable **from the captured telemetry records alone** (standard metric schema + envelope fields), and matches ground truth within clock resolution.
+- A4: every standard-schema instrument for all six endpoints is present in the capture with correct units and labels — no endpoint opted anything in.
+- A5: messaging stamps and telemetry record timestamps interleave correctly on one timeline (a transport hop never appears to precede the publish span that caused it).
+
+## M14 — Stack cold start: order, readiness, isolation, ownership
+
+**Purpose.** The composition-scale contracts as tests: arbitrary process start order, a bounded readiness barrier, domain isolation on a shared host, and the exclusive-ownership default.
+
+**Setup.** The M13 three-stage pipeline, started in all permutations of stage order (in-proc: thread start order; inter-process: process spawn order). Second copies: a duplicate estimator (ownership case) and a full second stack instance under a different domain key (isolation case).
+
+**Acceptance criteria.**
+- A1: every start permutation converges to the same wired state — `Subscribe` before `Advertise` is indistinguishable, after matching, from the reverse order.
+- A2: `WaitUntilMatched(endpoints, deadline)` returns success exactly when all listed endpoints have peers, and a distinct timeout status when the deadline passes with the estimator deliberately absent — the launcher's e-stop-release gate is buildable from this one verb.
+- A3: the duplicate estimator's `Advertise` on the exclusive topic is refused with the ownership status; after declaring `Ownership::kShared` on both, latest-only resolves last-writer-wins by stamp, deterministically under interleaving.
+- A4: the second stack instance under a different domain key shares nothing — no topic visibility, no shm segments, no introspection entries — verified positively (its own domain works) and negatively (cross-domain take never yields the other stack's data).
+- A5: `MatchedCount()` on each endpoint tracks join/leave of peers correctly through the estimator restart.
+
 ---
 
 ## API deltas discovered by the wish-code
@@ -208,4 +237,10 @@ Recorded as the wish-code is written; each delta feeds the P0a API design.
 | D9 | M3 | Endpoint counters (drops, refusals, overwrites) are programmatically queryable (`msg::introspect::*`) in addition to telemetry and the CLI — scenarios and applications can reconcile conservation exactly, in code. |
 | D10 | M5 | The server owns no threads (R3): `Serve<Req,Rsp>` yields a take/reply endpoint polled from an app-owned loop; `TakeRequest()` reuses the D1/D2 Sample surface, and the taken request carries the reply token + caller's telemetry context. Needs a bounded-park verb (`WaitForWorkOrShutdown`) so a server loop neither busy-spins nor sleeps blind. |
 | D11 | M5 | `Call(req, deadline)` has no deadline-less overload — unbounded waits are unrepresentable (M5-A4). Returns `Result<T>` (status + value, mirroring `Sample<T>`); `kDeadlineExpired` and `kNoServer` are distinct; late replies are discarded by correlation, never surfacing on later calls. Async `Call` variant deferred — no consumer shape demands it yet. |
+| D13 | M7 | Context propagation is **asymmetric by design**: `Publish` captures the calling thread's active telemetry context automatically (null context if none — fixed envelope size either way); the take side adopts **explicitly** via a `tel::ContextScope` RAII over `sample.context()`, restoring the prior thread context at scope exit. Automatic adoption is rejected — it would silently reparent a consumer's own trace (the cross-contamination M7-A2 forbids). The context travels with the value: an overwritten latest-only value takes its context with it. |
+| D14 | M13 | The envelope gains **lineage**: origin stamp + hop count, fixed-size. `PublishDerived(loan, upstream_sample)` preserves origin (oldest consumed input) and increments hops; plain `Publish` is hop zero. `Sample::origin_age()` sits beside `age()`. Per-hop decomposition stays out of the envelope — reconstructed offline from M7 trace links. |
+| D15 | M14 | Fifth QoS knob **Ownership**: `kExclusive` default (second `Advertise` refused, distinct status) / `kShared` by declaration (latest-only = last-writer-wins by publish stamp). |
+| D16 | M14 | Readiness surface: `MatchedCount()` per endpoint + `Domain::WaitUntilMatched(endpoints, deadline)` as the single bounded barrier verb. No match-event callbacks — that would reintroduce hidden execution (R3). |
+| D17 | M14 | Every `Domain` factory takes an **isolation key** (default derived from user + configured name); topics, segments, and introspection are namespaced by it. Two stacks on one host share nothing implicitly. |
+| D18 | M14 | Endpoint construction does not throw: `Advertise`/`Subscribe` return handles carrying a queryable status (`kOk`, `kOwnershipRefused`, type-mismatch per R6, unsupported-reach per M8-A2), so a launcher can enumerate exactly what failed. Consuming an invalid handle is a contract violation (debug-assert), mirroring the D2 `kNone`-dereference rule. |
 | D12 | M6 | `Domain` factories are per-backend with backend-specific config structs (the portable API never grows a union of engine options). The R8 clock declaration (`ClockDomain`) lives in the backend config and is introspection-visible. `domain.Supports(Contract::k…)` queries the R3 support matrix at wiring time. `Sample::age_class()` is `kMeasured`/`kAdvisory` — an advisory age **never** yields a `kStale` verdict; unsynced clocks must not produce confidently-wrong staleness. |
