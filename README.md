@@ -1,4 +1,7 @@
-# xmMessaging
+<h1 align="center">
+  <img src="docs/xmmessaging.svg" width="96" alt="xmMessaging"><br>
+  xmMessaging&nbsp;·&nbsp;π
+</h1>
 
 Typed, low-latency communication for composing XMotion components into running systems — the application-level glue tier decided in [ADR 0006](https://github.com/rxdu/xmotion/blob/main/docs/adr/0006-messaging-layer.md).
 
