@@ -226,7 +226,7 @@ WaitStatus Domain::WaitUntilMatched(
   //  - This is a wiring-time launcher verb called once per startup; 1 ms
   //    match-detection latency is irrelevant, and the poll reads only the
   //    lock-free matching counters (no interaction with wiring locks).
-  // TODO(P1): move the park onto the detail::CondvarWaiter seam (event-
+  // TODO(P1): move the park onto the xmBase CondvarEventCount seam (event-
   // driven wake on endpoint registration) once the baseline toolchain's
   // TSan intercepts pthread_cond_clockwait (GCC >= 12).
   const Timestamp deadline_at = ::xmotion::Now() + deadline;

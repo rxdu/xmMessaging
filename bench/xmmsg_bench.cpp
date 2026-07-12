@@ -21,18 +21,21 @@
  *               contention, not idle runs).
  *
  * M9-A3: every publish/take hot-path measured section runs under the
- * behavioral suite's AllocProbe; a single allocation fails the run. The
- * lock-free half of A3 is a compile-time fact asserted below: these
- * payloads take the seqlock LatestSlot (never MutexLatestSlot) and the
- * SPSC BoundedQueue — both lock-free by construction, TSan-verified by the
+ * family AllocProbe (xmbase/testing); a single allocation fails the run.
+ * The lock-free half of A3 is a compile-time fact asserted below: these
+ * payloads take the seqlock MessageSlot (never MutexMessageSlot) and the
+ * SPSC SpscQueue — both lock-free by construction, TSan-verified by the
  * behavioral suite.
  *
  * R3 note: at P0b the in-process reach IS the reference — there is no raw
  * backend to A/B against, so this suite records ABSOLUTE numbers; the
  * wrapper-overhead A/B lands with the first backend (P1).
  *
- * Harness: hand-rolled (bench/harness.hpp) — the family vendors no
- * google-benchmark, and telemetry's perf tier set the precedent.
+ * Harness: the family measurement harness (xmbase/testing/bench_harness.hpp,
+ * unified FROM this suite's hand-rolled harness at ADR 0007 W1) — the family
+ * vendors no google-benchmark, and telemetry's perf tier set the precedent.
+ * The emitted JSON keeps the xmmessaging-bench-v1 schema (compare.py reads
+ * benchmarks[].name + p50/p99/max).
  *
  * Bench code is exempt from the no-allocation rule EXCEPT inside measured
  * sections: every buffer is preallocated before its probe starts.
@@ -49,14 +52,15 @@
 #include <thread>
 #include <vector>
 
-#include "alloc_probe.hpp"  // ONE TU per binary: defines operator new/delete
-#include "harness.hpp"
+// ONE TU per binary: alloc_probe defines operator new/delete.
+#include "xmbase/testing/alloc_probe.hpp"
+#include "xmbase/testing/bench_harness.hpp"
 #include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
-using xmmsg_bench::BenchResult;
-using xmmsg_bench::ComputeStats;
-using xmmsg_bench::Stats;
+using xmotion::testing::BenchResult;
+using xmotion::testing::ComputeStats;
+using xmotion::testing::Stats;
 using xmotion::Duration;
 using xmotion::Now;
 using xmotion::Timestamp;
@@ -79,9 +83,9 @@ static_assert(sizeof(Payload<1024>) == 1024);
 static_assert(sizeof(Payload<65536>) == 65536);
 
 // M9-A3 lock-free proof, compile-time half: a trivially copyable mail record
-// selects the seqlock LatestSlot (wait-free reads/writes, no mutex — see
+// selects the seqlock MessageSlot (wait-free reads/writes, no mutex — see
 // detail::LatestSlotFor); a non-trivially-copyable one would silently fall
-// back to MutexLatestSlot and this suite would be benchmarking a lock.
+// back to MutexMessageSlot and this suite would be benchmarking a lock.
 static_assert(
     std::is_trivially_copyable_v<msg::detail::MailRecord<Payload<64>>> &&
         std::is_trivially_copyable_v<msg::detail::MailRecord<Payload<1024>>> &&
@@ -164,7 +168,7 @@ Stats MeasureMicro(Op&& op, int batch, int samples,
   }
   std::vector<double> per_op_ns(static_cast<std::size_t>(samples));
   {
-    xmmsg_test::AllocProbe probe;
+    xmotion::testing::AllocProbe probe;
     for (int s = 0; s < samples; ++s) {
       const Timestamp t0 = Now();
       for (int i = 0; i < batch; ++i) {
@@ -192,7 +196,7 @@ Stats MeasureMicroWithSetup(Setup&& setup, Op&& op, int batch, int samples,
   for (int s = 0; s < samples; ++s) {
     setup();
     {
-      xmmsg_test::AllocProbe probe;
+      xmotion::testing::AllocProbe probe;
       const Timestamp t0 = Now();
       for (int i = 0; i < batch; ++i) {
         op();
@@ -655,7 +659,7 @@ PathOutcome RunPath(const std::string& isolation, Duration period,
     std::uint64_t seq = 0;
     const Timestamp end_at = Now() + run_for;
     Timestamp next_tick = Now();
-    xmmsg_test::AllocProbe probe;  // gates Publish on this thread (M9-A3)
+    xmotion::testing::AllocProbe probe;  // gates Publish on this thread (M9-A3)
     while (Now() < end_at) {
       if (period > Duration::zero()) {
         next_tick += period;
@@ -673,7 +677,7 @@ PathOutcome RunPath(const std::string& isolation, Duration period,
   latency_ns.reserve(max_samples);
   arrival_ns.reserve(max_samples);
   {
-    xmmsg_test::AllocProbe probe;  // gates TakeLatest on this thread
+    xmotion::testing::AllocProbe probe;  // gates TakeLatest on this thread
     std::uint64_t last_seq = 0;
     Timestamp last_arrival{};
     while (!producer_done.load(std::memory_order_acquire)) {
@@ -831,7 +835,7 @@ void BenchSystemRobotProfile() {
       std::uint64_t seq = 0;
       const Timestamp end_at = Now() + run_for;
       Timestamp next_tick = Now();
-      xmmsg_test::AllocProbe probe;  // gates Publish (M9-A3)
+      xmotion::testing::AllocProbe probe;  // gates Publish (M9-A3)
       while (Now() < end_at) {
         next_tick += rc.period;
         std::this_thread::sleep_until(next_tick);
@@ -848,7 +852,7 @@ void BenchSystemRobotProfile() {
     });
     threads.emplace_back([&, c] {
       auto& my_topics = classes[c];
-      xmmsg_test::AllocProbe probe;  // gates TakeLatest (M9-A3)
+      xmotion::testing::AllocProbe probe;  // gates TakeLatest (M9-A3)
       while (!producers_done.load(std::memory_order_acquire)) {
         for (Topic& topic : my_topics) {
           auto sample = topic.sub.TakeLatest();
@@ -976,7 +980,7 @@ void BenchControlUnderFlood() {
 // Human summary + entry point.
 // ---------------------------------------------------------------------------
 
-void PrintHardwareContext(const xmmsg_bench::HardwareContext& hw) {
+void PrintHardwareContext(const xmotion::testing::HardwareContext& hw) {
   std::printf("xmMessaging M9 bench — in-process reach (P0b reference)\n");
   std::printf("  cpu      : %s (%u hw threads)\n", hw.cpu_model.c_str(),
               hw.nproc);
@@ -1016,7 +1020,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  const auto hw = xmmsg_bench::CaptureHardwareContext();
+  const auto hw = xmotion::testing::CaptureHardwareContext();
   PrintHardwareContext(hw);
 
   // --- micro layer ----------------------------------------------------------
@@ -1058,8 +1062,9 @@ int main(int argc, char** argv) {
 
   // --- report ----------------------------------------------------------------
   if (!out_path.empty()) {
-    if (!xmmsg_bench::WriteJsonReport(out_path, hw, g_results, g_smoke,
-                                      g_scale, g_gate_failures)) {
+    if (!xmotion::testing::WriteJsonReport(out_path, "xmmessaging-bench-v1",
+                                           hw, g_results, g_smoke, g_scale,
+                                           g_gate_failures)) {
       std::fprintf(stderr, "xmmsg_bench: FAILED to write %s\n",
                    out_path.c_str());
       return 1;

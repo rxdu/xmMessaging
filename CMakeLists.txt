@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(xmMessaging VERSION 0.1.0 LANGUAGES CXX)
 
 # P0b (part 1): the in-process reach is real — xmmessaging is a compiled
-# STATIC library (seqlock LatestSlot, SPSC BoundedQueue, typed Domain
+# STATIC library (xmBase concurrency MessageSlot/SpscQueue, typed Domain
 # registry; see include/xmmsg/detail/ and src/), and the behavioral
 # suite (test/behavioral/, gated by BUILD_TESTING) asserts the M1/M2/M3/M14
 # acceptance criteria from docs/scenarios.md. The wish-code scenario suite
@@ -42,7 +42,8 @@ if (XMMESSAGING_SANITIZE STREQUAL "thread")
   # ATOMIC data words + fences — so TSan's race detection is sound through
   # the atomic accesses without modeling the fences; the warning flags a
   # known, accepted limitation, and under XMMESSAGING_WERROR it would
-  # otherwise break the sanitizer leg (see latest_slot.hpp ordering notes).
+  # otherwise break the sanitizer leg (see the xmBase seqlock ordering
+  # notes, xmbase/concurrency/detail/seqlock_ring.hpp).
   add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g -Wno-tsan)
   add_link_options(-fsanitize=thread)
 elseif (XMMESSAGING_SANITIZE STREQUAL "address")
@@ -65,7 +66,7 @@ endif ()
 ## In-tree target > installed > bundled submodule — same resolution order as
 ## xmTelemetry/xmDriver.
 if (NOT TARGET xmotion::xmBase)
-  find_package(xmBase 0.4.0 QUIET)
+  find_package(xmBase 0.5.0 QUIET)
   if (NOT xmBase_FOUND)
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xmBase/CMakeLists.txt)
       message(STATUS "xmMessaging: using bundled third_party/xmBase")
@@ -247,7 +248,7 @@ set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/xmotion")
 set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 # The declared xmBase floor — same pin as find_package/find_dependency.
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libxmotion-base (>= 0.4.0)")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libxmotion-base (>= 0.5.0)")
 set(CPACK_GENERATOR "DEB")
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Ruixiang Du (ruixiang.du@gmail.com)")

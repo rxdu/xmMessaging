@@ -5,8 +5,9 @@
  * reach (design.md "The POSIX shm fallback backend"). Kernel-native
  * primitives only: named shm segments (shm_segment.hpp) + the SAME slot and
  * ring algorithms the in-process reach runs, re-placed into the shared
- * mapping (latest_slot.hpp / bounded_queue.hpp over ShmRegionPlacement) —
- * the placement parameterization bet, cashed in: zero algorithm changes.
+ * mapping (xmbase/concurrency message_slot.hpp / spsc_queue.hpp over
+ * RegionStorage — ADR 0007 W2 adoption) — the storage parameterization
+ * bet, cashed in: zero algorithm changes.
  *
  * Honestly-partial support matrix (R3 divergence-over-emulation, M6-A6),
  * decided and queryable via Domain::Supports():
@@ -46,7 +47,8 @@
  * (kill(pid, 0)) happens on wiring or readiness paths only.
  *
  * Crash story (M4): see shm_segment.hpp (liveness slots, ordinal
- * continuation) and latest_slot.hpp (LoadBounded/RepairAfterWriterCrash).
+ * continuation) and xmbase/concurrency message_slot.hpp
+ * (LoadBounded/RepairAfterWriterCrash).
  * The subscriber additionally keeps its last successfully-taken record as
  * a process-local fallback, so a publisher SIGKILLed mid-store degrades to
  * rising staleness on the value already held — never a torn read, never a
@@ -77,13 +79,13 @@
 #include <thread>
 #include <type_traits>
 
+#include "xmbase/concurrency/message_slot.hpp"
+#include "xmbase/concurrency/spsc_queue.hpp"
+#include "xmbase/concurrency/storage.hpp"
 #include "xmbase/telemetry/context.hpp"
 #include "xmbase/telemetry/handles.hpp"
-#include "xmmsg/detail/bounded_queue.hpp"
 #include "xmmsg/detail/envelope.hpp"
-#include "xmmsg/detail/latest_slot.hpp"
 #include "xmmsg/detail/mail_record.hpp"
-#include "xmmsg/detail/placement.hpp"
 #include "xmmsg/detail/schema_hash.hpp"
 #include "xmmsg/detail/shm_segment.hpp"
 
@@ -102,7 +104,10 @@ inline constexpr std::uint32_t kShmSeqlockRetryBudget = 4096;
 // The layout is a pure function of T and the segment constants, so every
 // process computes identical offsets — no negotiation, no fd passing.
 //
-// Segment map (all region starts 64-aligned; total validated in the header):
+// Segment map (all region starts 64-aligned; total validated in the header;
+// layout v3 — the xmBase 0.5.0 seqlock carve: each latest-slot region is one
+// cell [seq | write-index | record words] followed by the 64-aligned cursor
+// header, per MessageSlot::StorageBytes()):
 //   [ ShmSegmentHeader ]
 //   [ master latest slot ]                      (warm start, D6/M2)
 //   [ sub region 0: latest slot | ring control | ring cells x16 ]
@@ -113,8 +118,8 @@ template <typename T>
 class ShmTopicAttachment {
  public:
   using Record = MailRecord<T>;
-  using Slot = LatestSlot<T, ShmRegionPlacement>;
-  using Ring = BoundedQueue<T, ShmRegionPlacement>;
+  using Slot = concurrency::MessageSlot<Record, concurrency::RegionStorage>;
+  using Ring = concurrency::SpscQueue<Record, concurrency::RegionStorage>;
 
   static constexpr std::size_t Align64(std::size_t v) noexcept {
     return (v + 63u) & ~std::size_t{63u};
@@ -164,17 +169,18 @@ class ShmTopicAttachment {
 
   explicit ShmTopicAttachment(ShmMapping mapping)
       : mapping_(std::move(mapping)),
-        master_(ShmRegionPlacement(mapping_.base() + MasterOffset(),
-                                   LatestRegionBytes(), mapping_.created())) {
+        master_(concurrency::RegionStorage(mapping_.base() + MasterOffset(),
+                                           LatestRegionBytes(),
+                                           mapping_.created())) {
     // Attach views over every sub region (initialize = false: the OWNING
     // subscriber initializes its region at claim time). Built at wiring so
     // the fan-out never constructs anything (R7).
     for (std::uint32_t i = 0; i < kShmMaxSubscribers; ++i) {
-      latest_views_[i] = std::make_unique<Slot>(ShmRegionPlacement(
+      latest_views_[i] = std::make_unique<Slot>(concurrency::RegionStorage(
           SubLatestBase(i), LatestRegionBytes(), false));
       ring_views_[i] = std::make_unique<Ring>(
           kShmRingCapacity,
-          ShmRegionPlacement(SubRingBase(i), RingRegionBytes(), false));
+          concurrency::RegionStorage(SubRingBase(i), RingRegionBytes(), false));
     }
   }
 
@@ -468,7 +474,7 @@ class ShmSubImpl final : public EndpointImpl {
         // AddSubscriber sequence: seed BEFORE the activation store below,
         // because the seqlock is single-writer and the moment kShmSubActive
         // lands a racing publish may write this mailbox.
-        my_latest_ = std::make_unique<Slot>(ShmRegionPlacement(
+        my_latest_ = std::make_unique<Slot>(concurrency::RegionStorage(
             attachment_->SubLatestBase(i),
             ShmTopicAttachment<T>::LatestRegionBytes(), true));
         MailRecord<T> current;
@@ -480,9 +486,9 @@ class ShmSubImpl final : public EndpointImpl {
       } else {
         my_ring_ = std::make_unique<Ring>(
             history_.depth() == 0 ? 1 : history_.depth(),
-            ShmRegionPlacement(attachment_->SubRingBase(i),
-                               ShmTopicAttachment<T>::RingRegionBytes(),
-                               true));
+            concurrency::RegionStorage(attachment_->SubRingBase(i),
+                                       ShmTopicAttachment<T>::RingRegionBytes(),
+                                       true));
       }
       slot.state.store(kShmSubActive, std::memory_order_release);
       slot_index_ = static_cast<int>(i);

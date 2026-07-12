@@ -36,7 +36,7 @@
  * Crash safety (M4): the kernel owns the pages — a SIGKILLed participant
  * releases nothing and corrupts no lock, because there are no locks to
  * hold. A writer killed mid-store leaves a seqlock cell with an odd
- * sequence, which readers detect and skip (LatestSlot::LoadBounded) and
+ * sequence, which readers detect and skip (MessageSlot::LoadBounded) and
  * the next claiming writer repairs (RepairAfterWriterCrash) — the
  * "skippable sequence, no robust-lock recovery" story from design.md.
  *
@@ -82,7 +82,14 @@ inline constexpr std::uint64_t kShmMagic = 0x31455347534D4D58ULL;  // "XMMSGSE1"
 // visibility record (refusal_count / refused_* below, M11-A3). v1 readers
 // would compute wrong data-plane offsets, so the version bump makes them
 // refuse instead (the refuse-unknown rule).
-inline constexpr std::uint32_t kShmLayoutVersion = 2;
+// v3 (ADR 0007 W2, xmBase 0.5.0 concurrency adoption): the DATA PLANE
+// changed — every seqlock cell gained an 8-byte write-index word and each
+// slot region carries the ring's 64-aligned cursor header after the cell
+// (MessageSlot::StorageBytes(), xmbase/concurrency/detail/seqlock_ring.hpp).
+// The header bytes are unchanged from v2, but every region offset and the
+// total segment size differ, so a v2 build would corrupt a v3 segment; the
+// bump makes it refuse instead.
+inline constexpr std::uint32_t kShmLayoutVersion = 3;
 inline constexpr std::uint32_t kShmEnvelopeVersion = 0;  // wire-contract §2
 // Per-topic subscriber bound (the in-process reach bounds at 64; the shm
 // segment reserves real ring capacity per slot, so the bound is tighter —
@@ -145,7 +152,8 @@ struct ShmSegmentHeader {
   // Creation barrier: 0 while the creator initializes, 1 (release) when the
   // data plane is ready. Attachers acquire-poll it (bounded).
   std::atomic<std::uint32_t> init_state;
-  // Cross-process futex word (waiter.hpp FutexWaiter shm form). No P1b verb
+  // Cross-process futex word (xmbase/concurrency EventCount shared form).
+  // No P1b verb
   // parks on it yet — pub/sub take verbs never block (D5) and readiness
   // polls — but the wake seam is segment-resident from day one so a future
   // event-driven verb needs no layout bump.
@@ -196,10 +204,11 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free &&
                   std::atomic<std::uint32_t>::is_always_lock_free,
               "segment atomics must be address-free (lock-free) to be "
               "shared across mappings");
-// The header byte layout is published (wire-contract §8, layout v2) so an
-// external reader can be written from the spec alone. These asserts keep
-// the struct honest to the published offsets; any drift is a compile error
-// AND a kShmLayoutVersion bump.
+// The header byte layout is published (wire-contract §8, layout v3 — header
+// bytes unchanged since v2; v3 bumped for the data plane) so an external
+// reader can be written from the spec alone. These asserts keep the struct
+// honest to the published offsets; any drift is a compile error AND a
+// kShmLayoutVersion bump.
 static_assert(std::is_standard_layout_v<ShmSegmentHeader>,
               "the header layout is a cross-process contract");
 static_assert(sizeof(ShmSubSlot) == 56, "published sub-slot stride (§8)");
@@ -211,7 +220,7 @@ static_assert(offsetof(ShmSegmentHeader, schema_hash) == 16 &&
                   offsetof(ShmSegmentHeader, refusal_count) == 104 &&
                   offsetof(ShmSegmentHeader, sub_slots) == 136 &&
                   sizeof(ShmSegmentHeader) == 1032,
-              "published header offsets (wire-contract §8, layout v2)");
+              "published header offsets (wire-contract §8, layout v3)");
 
 // ---- naming (wire-contract §6.2, resolved at P1b) --------------------------
 // Segment name: "/xmmsg.<isolation-key>.<topic>". The isolation key is

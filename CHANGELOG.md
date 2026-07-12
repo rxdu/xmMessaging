@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Adopts the xmBase 0.5.0 foundation surface (ADR 0007, wave W2). No behavior change intended: the diff is includes/names/layout-constants plus deletions; the full behavioral suite (plain, TSan, ASan), the wire-schema conformance vectors, and the alloc-gated benchmarks are the acceptance evidence.
+
+- **Concurrency primitives come from xmBase** (`xmbase/concurrency/`): the local `detail/{latest_slot,bounded_queue,waiter,placement}.hpp` copies are deleted in favor of their promoted forms — `LatestSlot` → `MessageSlot` (storing `MailRecord<T>`), `BoundedQueue` → `SpscQueue`, `FutexWaiter` → `EventCount`, `CondvarWaiter` → `CondvarEventCount`, `HeapPlacement`/`ShmRegionPlacement` → `HeapStorage`/`RegionStorage`. `LoadBounded` and `RepairAfterWriterCrash` semantics are preserved; no alias shims.
+- **Shm segment layout v3** (`kShmLayoutVersion` 2 → 3): the xmBase seqlock cell carries an 8-byte write-index word and each slot region carries the ring's cursor word after the cell, so every data-plane offset and the total segment size change. The header bytes are unchanged from v2; mismatched builds refuse instead of corrupt (wire-contract §6.4/§8.3/§8.4 updated to match).
+- **Test/bench tooling comes from xmBase** (`xmbase/testing/`): the local `bench/harness.hpp` and `test/behavioral/alloc_probe.hpp` are deleted in favor of the unified `bench_harness.hpp`/`alloc_probe.hpp` (which were unified FROM them at W1); the bench report keeps the `xmmessaging-bench-v1` JSON schema.
+- **xmBase floor 0.4.0 → 0.5.0** (find_package, config-file `find_dependency`, deb `Depends`).
+
 ## v0.1.0 — 2026-07-11
 
 First release: the typed messaging surface with two real reaches. Covers phases P0.0 (wish-code spec), P0a (API headers), P0b (in-process reach), P1b (POSIX-shm inter-process backend), plus the M10 introspection and M11 rebuild-skew milestones pulled forward against the shm backend.

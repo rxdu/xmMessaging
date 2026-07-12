@@ -4,9 +4,10 @@ include(CMakeFindDependencyMacro)
 # references, so downstream find_package(xmMessaging) consumers get a usable
 # xmotion::xmmessaging target. Consumers link xmotion::xmmessaging.
 #
-# xmBase >= 0.4.0 is the declared foundation floor (clock, telemetry
-# context) — the same pin as the library's own find_package resolution.
-find_dependency(xmBase 0.4.0 REQUIRED)
+# xmBase >= 0.5.0 is the declared foundation floor (clock, telemetry
+# context, concurrency primitives) — the same pin as the library's own
+# find_package resolution.
+find_dependency(xmBase 0.5.0 REQUIRED)
 find_dependency(Threads REQUIRED)
 
 # Add the targets file

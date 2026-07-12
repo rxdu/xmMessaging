@@ -24,7 +24,7 @@
 #include <cstdint>
 #include <thread>
 
-#include "alloc_probe.hpp"
+#include "xmbase/testing/alloc_probe.hpp"
 #include "xmmsg/messaging.hpp"
 
 namespace msg = xmotion::messaging;
@@ -238,7 +238,7 @@ TEST(M1Behavioral, A4_AllocationFreeHotPath) {
 
   std::uint64_t consumed = 0;
   {
-    xmmsg_test::AllocProbe probe;  // counts this thread's heap allocations
+    xmotion::testing::AllocProbe probe;  // counts this thread's allocations
     for (std::uint64_t id = 2; id <= 10001; ++id) {
       FillPlan(plan, id);
       pub.Publish(plan);
