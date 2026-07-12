@@ -14,7 +14,7 @@
  *                 different keys share NOTHING — M14-A4)
  *   DomainState --*--> Topic<T> (keyed by topic string; carries the R6
  *                 schema hash and the D15 ownership state)
- *   Topic<T> --> master LatestSlot   (warm-start source for late joiners,
+ *   Topic<T> --> master MessageSlot  (warm-start source for late joiners,
  *                 D6: the slot exists, a new subscriber reads it — with
  *                 the ORIGINAL envelope, so age never lies)
  *            --*--> SubCore<T>       (one per subscriber: its OWN mailbox
@@ -84,11 +84,13 @@
 #include <utility>
 #include <vector>
 
+#include "xmbase/concurrency/event_count.hpp"
+#include "xmbase/concurrency/message_slot.hpp"
+#include "xmbase/concurrency/spsc_queue.hpp"
+#include "xmbase/concurrency/storage.hpp"
 #include "xmbase/telemetry/context.hpp"
 #include "xmbase/telemetry/handles.hpp"
-#include "xmmsg/detail/bounded_queue.hpp"
 #include "xmmsg/detail/envelope.hpp"
-#include "xmmsg/detail/latest_slot.hpp"
 #include "xmmsg/detail/mail_record.hpp"
 #include "xmmsg/detail/schema_hash.hpp"
 
@@ -97,13 +99,16 @@ namespace messaging {
 namespace detail {
 
 // The latest-only mailbox type for a payload: the wait-free seqlock slot
-// for trivially copyable payloads, the documented mutex fallback otherwise
-// (see latest_slot.hpp).
+// (xmBase concurrency MessageSlot — ADR 0007 W2 adoption) for trivially
+// copyable payloads, the documented mutex fallback otherwise. The slot
+// stores the whole MailRecord<T> (envelope + ordinal + payload), exactly
+// as the pre-W2 LatestSlot did.
 template <typename T>
-using LatestSlotFor =
-    std::conditional_t<std::is_trivially_copyable_v<MailRecord<T>>,
-                       LatestSlot<T, HeapPlacement, CondvarWaiter>,
-                       MutexLatestSlot<T>>;
+using LatestSlotFor = std::conditional_t<
+    std::is_trivially_copyable_v<MailRecord<T>>,
+    concurrency::MessageSlot<MailRecord<T>, concurrency::HeapStorage,
+                             concurrency::CondvarEventCount>,
+    concurrency::MutexMessageSlot<MailRecord<T>>>;
 
 // Lineage info for PublishDerived (D14).
 struct DerivedInfo {
@@ -201,7 +206,9 @@ struct SubCore {
     if (history.kind() == History::Kind::kLatestOnly) {
       latest = std::make_unique<LatestSlotFor<T>>();
     } else {
-      queue = std::make_unique<BoundedQueue<T, HeapPlacement>>(history.depth());
+      queue = std::make_unique<
+          concurrency::SpscQueue<MailRecord<T>, concurrency::HeapStorage>>(
+          history.depth());
     }
   }
 
@@ -220,7 +227,9 @@ struct SubCore {
 
   // Exactly one of these is engaged, by declared History (D7).
   std::unique_ptr<LatestSlotFor<T>> latest;
-  std::unique_ptr<BoundedQueue<T, HeapPlacement>> queue;
+  std::unique_ptr<
+      concurrency::SpscQueue<MailRecord<T>, concurrency::HeapStorage>>
+      queue;
 
   // D9 always-on counters (exact, independent of any telemetry binding).
   std::atomic<std::uint64_t> take_count{0};
@@ -350,7 +359,7 @@ class Topic final : public TopicBase {
       // D6 warm start: seed the new mailbox from the current slot value,
       // ORIGINAL envelope included (M2-A1: the stamp is the publish stamp,
       // so age reports the truth). Seeding must stay BEFORE the attach
-      // below: LatestSlot is single-writer, and the moment the attach
+      // below: MessageSlot is single-writer, and the moment the attach
       // store lands a racing Deliver may write this mailbox.
       MailRecord<T> current;
       if (master_.Load(current)) {
@@ -830,8 +839,9 @@ class RpcTopic final : public TopicBase {
 
   std::array<CallSlot<Req, Rsp>, kMaxInFlight> slots_{};
   std::atomic<std::uint64_t> next_correlation_{0};
-  FutexWaiter server_waiter_;  // parked by WaitForWorkOrShutdown
-  FutexWaiter client_waiter_;  // parked by Call (reply + slot acquisition)
+  concurrency::EventCount server_waiter_;  // parked by WaitForWorkOrShutdown
+  concurrency::EventCount client_waiter_;  // parked by Call (reply + slot
+                                           // acquisition)
 };
 
 // Combined R6 identity for an RPC topic: both directions participate, so a

@@ -314,6 +314,8 @@ where `<isolation-key>` is §6.2 and `<sanitized-topic>` applies §6.2's sanitiz
 
 **Segment contents.** A fixed header (identity, publisher liveness slot with pid + generation counter, the topic's ordinal counter — which survives publisher crashes, so a restarted publisher resumes the ordinal sequence — a cross-process futex word, and 16 subscriber slots carrying pid/state/history-shape plus the D9 counters as shared atomics), followed by the data plane: one master latest-only slot (the late-join warm-start source; it survives publisher death) and 16 per-subscriber regions (a seqlock slot **and** an SPSC ring reservation of 16 records each; tmpfs allocates pages on first touch, so unused reservation costs no RAM). The header layout version gates interpretation with the same refuse-unknown rule as the envelope version byte.
 
+**Data-plane region carve (layout v3).** Every region start is 64-byte aligned. A latest-only **slot region** is one seqlock cell followed by a cursor word: cell byte 0 is the `u64` sequence word, cell byte 8 the `u64` write-index word (the ring cursor position of the value held — new at v3), and the record words follow from cell byte 16; the cell is padded up to the next 64-byte boundary, after which one `u64` write-count cursor word closes the slot carve (`slot_bytes = align64(16 + 8 * ceil(record_bytes / 8)) + 8`, and the region reserves `align64(slot_bytes)`). A **ring region** is one control block (`u64` capacity; head and tail on separate 64-byte lines; 192 bytes total) followed by 16 plain record cells of `record_bytes` each, the whole region padded to 64. The master slot region sits at `align64(header)`; per-subscriber region *i* (slot region then ring region) follows at `master_offset + slot_region + i * (slot_region + ring_region)`. These offsets are a pure function of `payload_size` and the constants above, so every attacher computes them identically (v2 lacked the write-index and cursor words; a v2 reader would compute wrong offsets, hence the version bump).
+
 **Segment record layout — recorded divergence (P1b).** The segment's mail records carry the §2 envelope *fields* in a segment-local 48-byte packed form (context 24 B @0, publish stamp i64 @24, origin stamp i64 @32, hop count u32 @40, flags u32 @44) followed by a u64 transport ordinal and the payload — not the §2 64-byte frame (no version byte / reserved regions inside each record; the header carries the envelope version once per segment). Both P1b participants are this library, and the header's version fields gate skew. Aligning per-record bytes to the §2 frame (or publishing this record layout as normative) is REQUIRED before a foreign participant (M12) targets this backend; tracked in Open items.
 
 **Lifecycle.** Segments are **never unlinked by the library** ("last detacher unlinks" is racy, and unlinking would destroy the warm-start value whose survival is the point). They are bounded by the domain's topic set, namespaced by the isolation key, and reclaimed explicitly: `xmmsg clean` (R5 CLI, shipped with the P1b introspection follow-up) unlinks segments whose publisher and all subscribers are dead by pid probe — dry-run by default, `--yes` to unlink; `rm /dev/shm/xmmsg.<key>.*` remains the CLI-less manual path.
@@ -362,7 +364,7 @@ Histogram bucket boundaries are chosen by the telemetry binding, not this spec; 
 
 ## 8. Introspection surface (POSIX shm — resolved, P1b introspection follow-up)
 
-**Decision.** There is no separate introspection segment on the POSIX-shm backend: the per-topic transport segment header (§6.4) **is** the introspection surface — transport and introspection share the substrate by design (design.md R5), so the counters an observer reads are the very atomics the transport writes, and reconciliation with the endpoints' own `messaging.*` telemetry is exact by construction (M10-A2). This section is normative for **segment layout version 2**; an external observer implements it from this document alone. The reference consumers are `detail/introspect_reader.hpp` and the `xmmsg` CLI (`list` / `stat` / `watch` / `clean`), which ships with the library (R5). The CLI is live-state only — history is the telemetry plane's job, offline.
+**Decision.** There is no separate introspection segment on the POSIX-shm backend: the per-topic transport segment header (§6.4) **is** the introspection surface — transport and introspection share the substrate by design (design.md R5), so the counters an observer reads are the very atomics the transport writes, and reconciliation with the endpoints' own `messaging.*` telemetry is exact by construction (M10-A2). This section is normative for **segment layout version 3**; an external observer implements it from this document alone. The reference consumers are `detail/introspect_reader.hpp` and the `xmmsg` CLI (`list` / `stat` / `watch` / `clean`), which ships with the library (R5). The CLI is live-state only — history is the telemetry plane's job, offline.
 
 ### 8.1 Discovery
 
@@ -380,21 +382,21 @@ Discovery is a **directory scan** of the backend namespace (`/dev/shm` on Linux)
 - **Torn-read / crash-of-writer safety** (M10-A5): the only multi-word read is the master-slot envelope (§8.4), protected by the writer-progress-only seqlock — a torn copy cannot validate, a writer SIGKILLed mid-store leaves a permanently odd sequence that the bounded retry budget detects. An observer never blocks, never takes a lock, and never spins unbounded.
 - **Single-writer-per-slot** holds for every transport field. The one stated exception is the refusal record (§8.3): a last-writer-wins advisory slot written by *refused attachers* on the wiring path — each field is a single atomic (untorn by construction), `refusal_count` is the reliable monotonic signal, the `refused_*` fields identify the most recent offender.
 
-### 8.3 Header layout (layout version 2)
+### 8.3 Header layout (layout version 3)
 
-Little-endian, natural alignment; 1032 bytes total. "a" marks lock-free atomics. Offsets are normative for `layout_version` 2 (v1 lacked the refusal record; v1 readers refuse v2 and vice versa).
+Little-endian, natural alignment; 1032 bytes total. "a" marks lock-free atomics. Offsets are normative for `layout_version` 3. Version history: v1 lacked the refusal record; v2 added it; v3 keeps the header **byte-identical to v2** but changes the data plane (§6.4 region carve / §8.4 cell layout gained the write-index and cursor words), so every region offset and the total segment size differ — readers refuse any version they do not implement, in both directions.
 
 | Offset | Size | Field | Semantics |
 |---|---|---|---|
 | 0 | 8 | `magic` | `0x31455347534D4D58` ("XMMSGSE1") |
-| 8 | 4 | `layout_version` | **2** — refuse-unknown |
+| 8 | 4 | `layout_version` | **3** — refuse-unknown |
 | 12 | 4 | `envelope_version` | §2 version carried once per segment |
 | 16 | 8 | `schema_hash` | the topic's established R6 identity (§4) |
 | 24 | 8 | `payload_size` | bytes |
 | 32 | 8 | `payload_align` | bytes |
 | 40 | 8 | `total_size` | full segment size — validated by every attacher and observer |
-| 48 | 4 | `max_subscribers` | 16 at v2 |
-| 52 | 4 | `ring_capacity` | 16 at v2 |
+| 48 | 4 | `max_subscribers` | 16 at v3 |
+| 52 | 4 | `ring_capacity` | 16 at v3 |
 | 56 | 4 | `creator_history_kind` | creator's declared QoS: 0 latest-only, 1 queue |
 | 60 | 4 | `creator_queue_depth` | declared depth (queue kind) |
 | 64 | 4a | `init_state` | creation barrier: 1 (release) = data plane ready |
@@ -427,16 +429,16 @@ Per-subscriber slot (56 bytes, offsets relative to the slot):
 
 ### 8.4 Last-publish age: the master-slot read
 
-The master latest-only slot (the §6.4 warm-start slot) doubles as the last-publish record. It sits at offset `align64(1032)` = **1088** and is a seqlock cell: one `u64` sequence word followed by `N` data words, `N = (48 + 8 + payload_size + 7) / 8` (envelope + ordinal + payload, §6.4 record layout). An observer needs only the **prefix**: words 0–5 are the 48-byte envelope (publish stamp `i64` at record byte 24 = word 3; origin stamp at byte 32 = word 4), word 6 is the transport ordinal. Reading a prefix under the seqlock is exactly as torn-proof as reading everything — validation is on the sequence, not the byte count.
+The master latest-only slot (the §6.4 warm-start slot) doubles as the last-publish record. It sits at offset `align64(1032)` = **1088** and is a v3 seqlock cell (§6.4 region carve): the `u64` sequence word at cell byte 0, the `u64` write-index word at cell byte 8 (new at v3 — the ring cursor position of the held value; a depth-1 observer may ignore it, sequence validation alone rejects torn copies), then `N` record words from cell byte 16, `N = (48 + 8 + payload_size + 7) / 8` (envelope + ordinal + payload, §6.4 record layout). An observer needs only the **prefix**: record words 0–5 are the 48-byte envelope (publish stamp `i64` at record byte 24 = record word 3; origin stamp at byte 32 = record word 4), record word 6 is the transport ordinal. Reading a prefix under the seqlock is exactly as torn-proof as reading everything — validation is on the sequence, not the byte count. (The slot's write-count cursor word after the padded cell participates in region sizing only; the observer protocol does not read it.)
 
-Normative read protocol (bounded seqlock read; same memory-ordering pairs as the transport's own reader):
+Normative read protocol (bounded seqlock read; same memory-ordering pairs as the transport's own reader; `record_words` starts at cell byte 16):
 
 ```
 for attempt in 0 ..= retry_budget:            # budget REQUIRED; 4096 recommended
     s1 = load(seq, acquire)
     if s1 == 0:            -> EMPTY           # never written (or crash-repaired)
     if s1 is odd: continue                    # write in progress — retry
-    copy words[0..6] (relaxed loads)
+    copy record_words[0..6] (relaxed loads)
     fence(acquire)
     if load(seq, relaxed) == s1: -> VALUE     # validated, untorn
 -> STALLED                                    # budget exhausted

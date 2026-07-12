@@ -60,7 +60,7 @@
 #include <string>
 #include <vector>
 
-#include "xmmsg/detail/latest_slot.hpp"  // CpuRelax (seqlock retries)
+#include "xmbase/concurrency/message_slot.hpp"  // CpuRelax (seqlock retries)
 #include "xmmsg/detail/shm_segment.hpp"
 
 namespace xmotion {
@@ -386,10 +386,16 @@ class IntrospectReader {
   // offset after the header, and reading a PREFIX of the record's words
   // under the seqlock is exactly as torn-proof as reading all of them —
   // validation is on the sequence, not the byte count. Same memory-
-  // ordering pairs as LatestSlot::LoadBounded (latest_slot.hpp R1/R2).
+  // ordering pairs as MessageSlot::LoadBounded (xmbase/concurrency
+  // detail/seqlock_ring.hpp R1/R2).
   static constexpr std::size_t kMasterOffset =
       (sizeof(ShmSegmentHeader) + 63u) & ~std::size_t{63u};
-  // Words 0..5 are the 48-byte envelope; word 6 is the transport ordinal.
+  // Cell layout at v3 (xmBase 0.5.0 seqlock cell): word 0 is the sequence,
+  // word 1 the ring's write index — the record words start at cell word 2
+  // (wire-contract §8.4).
+  static constexpr std::size_t kCellPrefixWords = 2;  // seq + write index
+  // Record words 0..5 are the 48-byte envelope; word 6 is the transport
+  // ordinal.
   static constexpr std::size_t kEnvelopeWords = 7;
   static constexpr std::size_t kPublishStampWord = 3;  // record byte 24
   static constexpr std::size_t kOriginStampWord = 4;   // record byte 32
@@ -402,14 +408,15 @@ class IntrospectReader {
     out->last_ordinal = 0;
     // Guard the prefix read against a lying total_size (already validated
     // against the real object size in Open).
-    if (kMasterOffset + (1 + kEnvelopeWords) * sizeof(std::uint64_t) >
+    if (kMasterOffset +
+            (kCellPrefixWords + kEnvelopeWords) * sizeof(std::uint64_t) >
         size_) {
       out->master = MasterReadResult::kEmpty;
       return;
     }
     const auto* seq = reinterpret_cast<const std::atomic<std::uint64_t>*>(
         base_ + kMasterOffset);
-    const auto* words = seq + 1;
+    const auto* words = seq + kCellPrefixWords;
     std::uint64_t staged[kEnvelopeWords];
     for (std::uint32_t attempt = 0; attempt <= kIntrospectRetryBudget;
          ++attempt) {
@@ -419,7 +426,7 @@ class IntrospectReader {
         return;
       }
       if ((s1 & 1u) != 0u) {  // write in progress — or writer died mid-store
-        CpuRelax();
+        concurrency::CpuRelax();
         continue;
       }
       for (std::size_t i = 0; i < kEnvelopeWords; ++i) {
@@ -435,7 +442,7 @@ class IntrospectReader {
         out->last_ordinal = staged[kOrdinalWord];
         return;
       }
-      CpuRelax();
+      concurrency::CpuRelax();
     }
     // Budget exhausted: kStalled (set above) — the honest answer when the
     // writer died mid-store; the caller reports "last publish unknown".
