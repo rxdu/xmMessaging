@@ -72,6 +72,30 @@ jobs:
   # baselines, so the documented commands and the verified commands cannot
   # drift. (Deliberately near-duplicates the build job's configure+build:
   # the claim under test is the user's literal first-run experience.)
+  # macOS coverage: AppleClang + libc++ on arm64. Also the only lane where the
+  # M8-A3 dependency-closure gate runs through otool -L instead of ldd.
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        # eigen@3 is keg-only (Homebrew's default eigen is 5.x). googletest is
+        # needed because this repo vendors no copy.
+        run: brew install ninja eigen@3 abseil re2 googletest
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON -DXMMESSAGING_WERROR=ON
+          -DCMAKE_PREFIX_PATH="$(brew --prefix eigen@3)"
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --no-tests=error
+
   quickstart:
     name: quickstart (${{ matrix.os }}, R1)
     runs-on: ${{ matrix.os }}
