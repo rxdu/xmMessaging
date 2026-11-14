@@ -76,7 +76,7 @@ jobs:
   # M8-A3 dependency-closure gate runs through otool -L instead of ldd.
   macos:
     name: macOS (arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
         with:
